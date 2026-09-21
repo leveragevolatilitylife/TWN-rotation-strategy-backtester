@@ -48,10 +48,6 @@ npm run preview    # 本機預覽建置後的成品
 
 ## 更新回測資料（上傳新版 Excel）
 
-有兩種更新資料的方式：
-
-### 方式一：更新網站的「預設資料」（永久生效、所有訪客都看得到）
-
 1. 用新版的 `Stock_data_collection.xlsx` **直接覆蓋** `data/Stock_data_collection.xlsx` 這個檔案。
 2. `git add data/Stock_data_collection.xlsx && git commit -m "Update stock data" && git push`。
 3. Push 上去之後，GitHub Actions 會自動：
@@ -69,11 +65,11 @@ npm run preview    # 本機預覽建置後的成品
 
    這會直接重新產生 `src/data/twn_data.json`，可以打開來看看筆數、起訖日期對不對，再一起 commit push。
 
-**欄位需求**：xlsx 需含「TWN historical data」分頁，且欄位（標題列）需包含：`Date`、`0050 price`、`0050 open price`、`00631L price`、`00631L open price`、`00635U price`、`00635U open price`；`VX30:VIX Roll Yield`與`VIX`為選填（缺少的話 VIX Rotation 相關策略的訊號會失真，但不影響其他功能）。這和網站內「上傳更新資料」按鈕的解析邏輯完全一致。
+**欄位需求**：xlsx 需含「TWN historical data」分頁，且欄位（標題列）需包含：`Date`、`0050 price`、`0050 open price`、`00631L price`、`00631L open price`、`00635U price`、`00635U open price`；`VX30:VIX Roll Yield`與`VIX`為選填（缺少的話 VIX Rotation 相關策略的訊號會失真，但不影響其他功能）。
 
-### 方式二：只在瀏覽器裡臨時測試（不會影響網站，不需要 push）
+**資料範圍與「可選擇的回測起始日」是兩件事**：`scripts/parse-xlsx.mjs` 現在保留檔案裡的完整歷史（本檔案回溯至 2007 年），刻意不做日期下限篩選——因為 VX30:VIX Roll Yield 欄位在 2014-11-03 之前就有真實歷史資料，保留它可以讓 VIX 滾動視窗（預設 1000 個交易日）從 2014-11-03 就已經完整暖身，不用再等 4 年才開始產生訊號。但 00631L/00635U/0050 等價格欄位在 2014-11-03（各 ETF 真正上市）之前是原始檔案用常數回填的佔位資料，不是真實市場資料，所以 `src/App.jsx` 裡的 `DEFAULT_RANGE_START` 常數把「可選擇的回測起始日」鎖定在 2014-11-03——UI 上的日期選擇器不論資料集本身多早，都無法選到更早的日期，避免用到佔位資料段落、得出失真的權益曲線。如果之後要調整這個下限，只需要改 `src/App.jsx` 裡的 `DEFAULT_RANGE_START` 常數即可，`scripts/parse-xlsx.mjs` 不需要跟著改（它本來就保留全部歷史）。
 
-網站右上角的「上傳更新資料 (.xlsx)」按鈕，可以直接在瀏覽器選一個檔案，整個回測資料集會在**這次瀏覽**中被替換，方便您測試新資料而不用真的更新 repo。重新整理頁面後就會恢復成 repo 裡的預設資料。這個功能本來就內建在 App 裡，跟方式一是互補的：方式一是「換掉大家看到的預設值」，方式二是「我自己臨時測試一下」。
+> 網站本身沒有瀏覽器端「上傳更新資料」的功能——所有資料更新都是透過上面「覆蓋 xlsx + push」這個流程統一處理，確保所有訪客看到的都是同一份、來自 repo 的資料。
 
 ## 專案結構
 
