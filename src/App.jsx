@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useRef } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -14,8 +14,7 @@ import {
   Tooltip,
   Legend,
 } from "recharts";
-import * as XLSX from "xlsx";
-import { Upload, Trash2, Plus, TrendingUp, TrendingDown, AlertCircle, Activity, FlaskConical } from "lucide-react";
+import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import RAW_DATA from "./data/twn_data.json";
 
 const ASSET_KEYS = ["00631L", "00635U", "0050", "CASH"];
@@ -910,18 +909,18 @@ function computeDrawdownPct(equitySlice) {
    主元件
    ============================================================ */
 export default function App() {
-  const [dataset, setDataset] = useState(() => INITIAL_DATASET);
-  const [dataMeta, setDataMeta] = useState({
-    source: "內建資料（Stock_data_collection.xlsx）",
-    rowCount: RAW_DATA.length,
-  });
-  const [uploadError, setUploadError] = useState(null);
-  const [uploadNotice, setUploadNotice] = useState(null);
-  const fileInputRef = useRef(null);
+  // 資料為靜態內建資料（不再提供瀏覽器端上傳更新，資料更新請透過 GitHub repo 的
+  // data/Stock_data_collection.xlsx + GitHub Actions 自動重新部署）
+  const dataset = INITIAL_DATASET;
+  const dataMeta = { source: "內建資料（Stock_data_collection.xlsx）", rowCount: RAW_DATA.length };
 
   const minDate = dataset.dates[0];
   const maxDate = dataset.dates[dataset.n - 1];
-  const [rangeStart, setRangeStart] = useState(() => (DEFAULT_RANGE_START >= minDate ? DEFAULT_RANGE_START : minDate));
+  // 可選擇的最早回測起始日：資料集本身可能為了讓VIX滾動視窗有足夠暖身資料而往前延伸
+  // （00631L/00635U等ETF在真正上市前是佔位資料），因此「可選擇」的起始日仍鎖定在
+  // DEFAULT_RANGE_START，避免使用者手動選到佔位資料那段、得出失真的權益曲線。
+  const earliestSelectableDate = DEFAULT_RANGE_START >= minDate ? DEFAULT_RANGE_START : minDate;
+  const [rangeStart, setRangeStart] = useState(earliestSelectableDate);
   const [rangeEnd, setRangeEnd] = useState(maxDate);
 
   // 草稿設定（尚未加入比較）
@@ -1207,95 +1206,6 @@ export default function App() {
   }, [runs, benchOn, dataset, rangeIdx]);
 
 
-  /* ---------- 檔案上傳 ---------- */
-  const normalizeHeader = (h) =>
-    String(h == null ? "" : h)
-      .replace(/\s+/g, "")
-      .toLowerCase();
-
-  const handleFile = async (file) => {
-    setUploadError(null);
-    setUploadNotice(null);
-    try {
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: "array", cellDates: true });
-      let sheetName = wb.SheetNames.find((s) => s.includes("TWN") && s.includes("historical"));
-      if (!sheetName) sheetName = wb.SheetNames.find((s) => normalizeHeader(s).includes("historicaldata"));
-      if (!sheetName) sheetName = wb.SheetNames[0];
-      const sheet = wb.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
-
-      let headerRowIdx = -1;
-      for (let i = 0; i < Math.min(rows.length, 6); i++) {
-        if (rows[i] && rows[i].some((c) => normalizeHeader(c) === "date")) {
-          headerRowIdx = i;
-          break;
-        }
-      }
-      if (headerRowIdx === -1) throw new Error("找不到標題列（需含「Date」欄）。");
-
-      const header = rows[headerRowIdx].map(normalizeHeader);
-      const colIdx = {
-        date: header.indexOf("date"),
-        p0050: header.indexOf("0050price"),
-        o0050: header.indexOf("0050openprice"),
-        p631L: header.indexOf("00631lprice"),
-        o631L: header.indexOf("00631lopenprice"),
-        p635U: header.indexOf("00635uprice"),
-        o635U: header.indexOf("00635uopenprice"),
-        rollYield: header.findIndex((h) => h.includes("rollyield")),
-        vix: header.indexOf("vix"),
-      };
-      const requiredKeys = ["date", "p0050", "o0050", "p631L", "o631L", "p635U", "o635U"];
-      const missing = requiredKeys.filter((k) => colIdx[k] === -1);
-      if (missing.length > 0) throw new Error(`缺少必要欄位（含開盤價）：${missing.join(", ")}`);
-
-      const parsed = [];
-      for (let i = headerRowIdx + 1; i < rows.length; i++) {
-        const r = rows[i];
-        if (!r) continue;
-        const rawDate = r[colIdx.date];
-        if (rawDate == null) continue;
-        let dateStr;
-        if (rawDate instanceof Date) {
-          dateStr = rawDate.toISOString().slice(0, 10);
-        } else if (typeof rawDate === "string" && /^\d{4}-\d{2}-\d{2}/.test(rawDate)) {
-          dateStr = rawDate.slice(0, 10);
-        } else {
-          continue;
-        }
-        const c0050 = r[colIdx.p0050], op0050 = r[colIdx.o0050];
-        const c631L = r[colIdx.p631L], op631L = r[colIdx.o631L];
-        const c635U = r[colIdx.p635U], op635U = r[colIdx.o635U];
-        if ([c0050, op0050, c631L, op631L, c635U, op635U].some((v) => v == null)) continue;
-        const rollYield = colIdx.rollYield >= 0 ? r[colIdx.rollYield] : null;
-        const vix = colIdx.vix >= 0 ? r[colIdx.vix] : null;
-        parsed.push([
-          dateStr,
-          Number(c0050), Number(op0050),
-          Number(c631L), Number(op631L),
-          Number(c635U), Number(op635U),
-          rollYield == null ? 0 : Number(rollYield),
-          vix == null ? 0 : Number(vix),
-        ]);
-      }
-      if (parsed.length < 30) throw new Error("解析後的有效資料列太少，請確認檔案內容與欄位格式。");
-      parsed.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-
-      const newDataset = buildDataset(parsed);
-      setDataset(newDataset);
-      setDataMeta({ source: `上傳檔案：${file.name}`, rowCount: parsed.length });
-      setRangeStart(DEFAULT_RANGE_START >= newDataset.dates[0] ? DEFAULT_RANGE_START : newDataset.dates[0]);
-      setRangeEnd(newDataset.dates[newDataset.n - 1]);
-      setRuns([]);
-      setUploadNotice(
-        `已載入 ${parsed.length} 筆交易日資料（${newDataset.dates[0]} ～ ${newDataset.dates[newDataset.n - 1]}）。原有比較清單已重置，請重新加入策略。`
-      );
-    } catch (err) {
-      setUploadError(err.message || "檔案解析失敗，請確認格式。");
-    }
-  };
-
   const S = THEME;
 
   return (
@@ -1335,43 +1245,7 @@ export default function App() {
             <div className="mono" style={{ fontSize: 12, color: S.textFaint }}>
               {dataset.dates[0]} ～ {dataset.dates[dataset.n - 1]} ・ {dataMeta.rowCount} 個交易日
             </div>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              style={{
-                marginTop: 6,
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                background: "transparent",
-                border: `1px solid ${S.border}`,
-                color: S.text,
-                borderRadius: 4,
-                padding: "5px 10px",
-                fontSize: 12,
-                cursor: "pointer",
-              }}
-            >
-              <Upload size={13} /> 上傳更新資料 (.xlsx)
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls"
-              style={{ display: "none" }}
-              onChange={(e) => e.target.files && e.target.files[0] && handleFile(e.target.files[0])}
-            />
           </div>
-        </div>
-        {uploadError && (
-          <div style={{ marginTop: 8, fontSize: 12, color: S.rose, display: "flex", gap: 6, alignItems: "center" }}>
-            <AlertCircle size={13} /> {uploadError}
-          </div>
-        )}
-        {uploadNotice && (
-          <div style={{ marginTop: 8, fontSize: 12, color: S.teal }}>{uploadNotice}</div>
-        )}
-        <div style={{ marginTop: 6, fontSize: 11, color: S.textFaint }}>
-          上傳檔案需含「TWN historical data」分頁，欄位包含 Date、0050／00631L／00635U 的 price 與 open price（VX30:VIX Roll Yield 與 VIX 為選填）。
         </div>
       </div>
 
@@ -1444,7 +1318,7 @@ export default function App() {
             <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
               <div style={{ flex: 1 }}>
                 <FieldLabel text="起" />
-                <input type="date" value={rangeStart} min={minDate} max={rangeEnd} onChange={(e) => setRangeStart(e.target.value)} />
+                <input type="date" value={rangeStart} min={earliestSelectableDate} max={rangeEnd} onChange={(e) => setRangeStart(e.target.value)} />
               </div>
               <div style={{ flex: 1 }}>
                 <FieldLabel text="迄" />
@@ -2188,6 +2062,7 @@ export default function App() {
               說明／假設：訊號以「當日收盤」計算，隔日套用（避免未來函數）・輪動當天以「開盤價」成交：舊標的計前收→開盤的隔夜報酬，新標的計開盤→收盤的盤中報酬，並依左側設定扣除手續費（買賣各一次）與證交稅（僅賣出）；未輪動的日子維持一般收盤對收盤報酬、無交易成本・
               交易成本已直接反映在權益曲線與下方所有績效指標中，未另計滑價・均線可選「收盤價」（標準SMA）或「當日開盤價」（MA Rotation II：以當日開盤+前(N-1)日收盤計算，可於當日開盤時即得訊號）兩種計算基準，乖離率 = (比較價 − 均線)/均線・
               5 組預設策略的參數（均線天數/基準、VIX滾動視窗與分位門檻、Hybrid合併模式）皆由原始試算表公式逐一比對確認；手續費率預設為標準（未折扣）費率0.1425%，原始試算表實際採用之折扣費率為0.1425%×0.6=0.0855%且每次輪動僅合併扣除一次，本工具則對賣出與買進各計一次（較符合實際交易機制），如需貼近原始試算表可將左側手續費率調整為0.0855%參考，惟仍會因計費次數不同而略有落差，非計算錯誤・
+              內建資料的VX30:VIX Roll Yield回溯至2007年（讓VIX滾動視窗從回測期間一開始就有足夠暖身資料，不需等待數年才產生訊號），但00631L/00635U/0050等價格在2014/11/3之前為原始檔案回填的佔位資料（ETF尚未上市），因此「回測期間」的起始日不論資料集本身多早，UI上都鎖定最早只能選到2014/11/3，避免選到佔位資料段落、得出失真的權益曲線與績效指標。
               VIX 分位門檻採「滾動視窗」逐日重新計算，避免使用未來資料・CAGR 以 252 個交易日/年換算，Sharpe／Sortino 以日報酬年化並扣除設定之無風險利率，Sortino 僅計入低於無風險利率之下方波動・
               Ulcer Index 為回撤深度的均方根（%），UPI = (CAGR% − 無風險利率%) / Ulcer Index・回撤曲線與 Ulcer Index／最大回撤使用同一套「相對歷史高點」定義・「交易分析」表以「每次輪動買進到下次輪動賣出」為一筆交易，勝率／賠率／期望值皆以此為單位計算，僅計入完整落於所選日期範圍內、且已平倉的交易；期末仍持有中的部位不計入・
               IC 以「策略當日多空方向（多方=+1／空方=-1）」與「隔日多空資產報酬價差」的皮爾森相關係數衡量，滾動IC為固定視窗、累計IC為自資料起點展開之視窗，IR = 滾動IC序列之均值/標準差；三者皆為訊號品質的輔助診斷，非直接等於策略報酬・
