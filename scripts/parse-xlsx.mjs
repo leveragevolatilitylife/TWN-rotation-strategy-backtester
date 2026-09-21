@@ -19,6 +19,14 @@ const repoRoot = path.resolve(__dirname, "..");
 const inputPath = path.resolve(repoRoot, process.argv[2] || "data/Stock_data_collection.xlsx");
 const outputPath = path.resolve(repoRoot, process.argv[3] || "src/data/twn_data.json");
 
+// 注意：這裡刻意不對日期設下限。00631L/00635U/0050 等價格欄位在 2014-11-03
+// 之前於原始檔案中是用常數回填的佔位資料（ETF尚未真正存在），但 VX30:VIX
+// Roll Yield 欄位在此之前有真實歷史資料（本檔案回溯至 2007 年），保留完整
+// 歷史讓 App 端的 VIX 滾動視窗（預設 1000 個交易日）從 2014-11-03 就已完整
+// 暖身，不必再等 4 年才產生訊號。App 端會另外限制「可選擇的回測起始日」
+// 不早於 2014-11-03（見 src/App.jsx 的 DEFAULT_RANGE_START），避免使用者
+// 選到佔位資料那段、得出失真的權益曲線。
+
 function normalizeHeader(h) {
   return String(h == null ? "" : h)
     .replace(/\s+/g, "")
@@ -66,6 +74,17 @@ function main() {
   }
   if (headerRowIdx === -1) {
     console.error('[parse-xlsx] 找不到標題列（需含「Date」欄）。');
+    console.error(`[parse-xlsx] 這個檔案裡總共有 ${wb.SheetNames.length} 個分頁：${wb.SheetNames.join("、")}`);
+    console.error(`[parse-xlsx] 目前選到的分頁「${sheetName}」前 3 列內容：`);
+    for (let i = 0; i < Math.min(3, rows.length); i++) {
+      console.error(`  第${i + 1}列: ${JSON.stringify(rows[i])}`);
+    }
+    console.error(
+      "[parse-xlsx] 若分頁數量與預期不符（例如應該有多個分頁卻只看到 1 個、或看到的是空白/亂碼），" +
+        "很可能是這個 xlsx 檔案在 Git 儲存過程中被當成文字檔做了換行轉換而損毀。" +
+        "請確認 repo 根目錄有 .gitattributes 且包含「*.xlsx binary」，" +
+        "並用「git rm --cached <檔案路徑> && git add <檔案路徑> && git commit」重新以二進位方式提交該檔案後再 push。"
+    );
     process.exit(1);
   }
 
