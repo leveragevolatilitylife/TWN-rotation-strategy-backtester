@@ -1377,7 +1377,7 @@ export default function App() {
             />
             {draft.vixEnabled && (
               <div style={{ marginBottom: 18, paddingLeft: 2 }}>
-                <FieldLabel text="滾動視窗（交易日，約 4 年 = 1008）" />
+                <FieldLabel text="滾動視窗（交易日，約 4 年 = 1000）" />
                 <input type="number" value={draft.vixLookback} min={60} max={2500} step={10} onChange={(e) => setDraft((d) => ({ ...d, vixLookback: Number(e.target.value) }))} />
                 <div style={{ marginTop: 10 }}>
                   <FieldLabel text="門檻模式" />
@@ -1642,7 +1642,7 @@ export default function App() {
                 <input
                   type="number"
                   value={pboMaxCombos}
-                  min={4}
+                  min={0}
                   max={20000}
                   step={10}
                   onChange={(e) => setPboMaxCombos(Math.min(20000, Math.max(4, Number(e.target.value))))}
