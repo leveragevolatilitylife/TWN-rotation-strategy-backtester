@@ -1786,98 +1786,6 @@ export default function App() {
               )}
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 22, marginBottom: 10 }}>
-              <Activity size={15} color={S.textMuted} />
-              <span style={{ fontSize: 13, fontWeight: 600 }}>資訊係數 (IC) 分析 — 訊號方向 vs. 隔日多空價差報酬</span>
-            </div>
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <div style={{ flex: "1 1 320px", minWidth: 280 }}>
-                <div style={{ fontSize: 11, color: S.textFaint, marginBottom: 6 }}>滾動 IC（視窗＝{draft.icWindow} 個交易日）</div>
-                <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 6, padding: "10px 8px 4px" }}>
-                  {icChartData.rollingSeries.length === 0 ? (
-                    <EmptyState S={S} />
-                  ) : (
-                    <ResponsiveContainer width="100%" height={220}>
-                      <LineChart data={icChartData.rollingPoints} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
-                        <CartesianGrid stroke={S.borderSoft} vertical={false} />
-                        <XAxis dataKey="date" tick={{ fontSize: 9, fill: S.textFaint }} minTickGap={50} stroke={S.border} />
-                        <YAxis tick={{ fontSize: 9, fill: S.textFaint }} stroke={S.border} domain={[-1, 1]} width={32} />
-                        <Tooltip
-                          contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
-                          labelStyle={{ color: S.textMuted }}
-                          formatter={(v, n) => [v == null ? "—" : v.toFixed(3), n]}
-                        />
-                        {icChartData.rollingSeries.map((s) => (
-                          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
-                        ))}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  )}
-                </div>
-              </div>
-              <div style={{ flex: "1 1 320px", minWidth: 280 }}>
-                <div style={{ fontSize: 11, color: S.textFaint, marginBottom: 6 }}>累計（擴張視窗）IC</div>
-                <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 6, padding: "10px 8px 4px" }}>
-                  {icChartData.expandingSeries.length === 0 ? (
-                    <EmptyState S={S} />
-                  ) : (
-                    <ResponsiveContainer width="100%" height={220}>
-                      <LineChart data={icChartData.expandingPoints} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
-                        <CartesianGrid stroke={S.borderSoft} vertical={false} />
-                        <XAxis dataKey="date" tick={{ fontSize: 9, fill: S.textFaint }} minTickGap={50} stroke={S.border} />
-                        <YAxis tick={{ fontSize: 9, fill: S.textFaint }} stroke={S.border} domain={[-1, 1]} width={32} />
-                        <Tooltip
-                          contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
-                          labelStyle={{ color: S.textMuted }}
-                          formatter={(v, n) => [v == null ? "—" : v.toFixed(3), n]}
-                        />
-                        {icChartData.expandingSeries.map((s) => (
-                          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
-                        ))}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ overflowX: "auto", border: `1px solid ${S.border}`, borderRadius: 6, marginTop: 12 }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }} className="mono">
-                <thead>
-                  <tr style={{ background: S.panelAlt, textAlign: "right" }}>
-                    <Th align="left">策略</Th>
-                    <Th>平均滾動IC</Th>
-                    <Th>IC標準差</Th>
-                    <Th>IR (IC均值/IC標準差)</Th>
-                    <Th>期末累計IC</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {icTableRows.length === 0 && (
-                    <tr>
-                      <td colSpan={5} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
-                        尚未加入任何策略。
-                      </td>
-                    </tr>
-                  )}
-                  {icTableRows.map((row) => (
-                    <tr key={row.id} style={{ borderTop: `1px solid ${S.borderSoft}` }}>
-                      <Td align="left">
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "ui-sans-serif" }}>
-                          <span style={{ width: 8, height: 8, borderRadius: 2, background: row.color, display: "inline-block" }} />
-                          {row.name}
-                        </span>
-                      </Td>
-                      <Td colorize value={row.icMean} S={S}>{row.icMean == null ? "—" : num(row.icMean, 3)}</Td>
-                      <Td>{row.icStd == null ? "—" : num(row.icStd, 3)}</Td>
-                      <Td colorize value={row.ir} S={S}>{row.ir == null ? "—" : num(row.ir, 2)}</Td>
-                      <Td colorize value={row.icExpFinal} S={S}>{row.icExpFinal == null ? "—" : num(row.icExpFinal, 3)}</Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
             <div style={{ marginTop: 22, marginBottom: 8, fontSize: 13, fontWeight: 600 }}>整體績效</div>
             <div style={{ overflowX: "auto", border: `1px solid ${S.border}`, borderRadius: 6 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }} className="mono">
@@ -1980,6 +1888,98 @@ export default function App() {
                       <Td colorize value={row.expectancy} S={S}>
                         {pct(row.expectancy)}
                       </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 22, marginBottom: 10 }}>
+              <Activity size={15} color={S.textMuted} />
+              <span style={{ fontSize: 13, fontWeight: 600 }}>資訊係數 (IC) 分析 — 訊號方向 vs. 隔日多空價差報酬</span>
+            </div>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                <div style={{ fontSize: 11, color: S.textFaint, marginBottom: 6 }}>滾動 IC（視窗＝{draft.icWindow} 個交易日）</div>
+                <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 6, padding: "10px 8px 4px" }}>
+                  {icChartData.rollingSeries.length === 0 ? (
+                    <EmptyState S={S} />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={icChartData.rollingPoints} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+                        <CartesianGrid stroke={S.borderSoft} vertical={false} />
+                        <XAxis dataKey="date" tick={{ fontSize: 9, fill: S.textFaint }} minTickGap={50} stroke={S.border} />
+                        <YAxis tick={{ fontSize: 9, fill: S.textFaint }} stroke={S.border} domain={[-1, 1]} width={32} />
+                        <Tooltip
+                          contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
+                          labelStyle={{ color: S.textMuted }}
+                          formatter={(v, n) => [v == null ? "—" : v.toFixed(3), n]}
+                        />
+                        {icChartData.rollingSeries.map((s) => (
+                          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+              <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                <div style={{ fontSize: 11, color: S.textFaint, marginBottom: 6 }}>累計（擴張視窗）IC</div>
+                <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 6, padding: "10px 8px 4px" }}>
+                  {icChartData.expandingSeries.length === 0 ? (
+                    <EmptyState S={S} />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={icChartData.expandingPoints} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+                        <CartesianGrid stroke={S.borderSoft} vertical={false} />
+                        <XAxis dataKey="date" tick={{ fontSize: 9, fill: S.textFaint }} minTickGap={50} stroke={S.border} />
+                        <YAxis tick={{ fontSize: 9, fill: S.textFaint }} stroke={S.border} domain={[-1, 1]} width={32} />
+                        <Tooltip
+                          contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
+                          labelStyle={{ color: S.textMuted }}
+                          formatter={(v, n) => [v == null ? "—" : v.toFixed(3), n]}
+                        />
+                        {icChartData.expandingSeries.map((s) => (
+                          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ overflowX: "auto", border: `1px solid ${S.border}`, borderRadius: 6, marginTop: 12 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }} className="mono">
+                <thead>
+                  <tr style={{ background: S.panelAlt, textAlign: "right" }}>
+                    <Th align="left">策略</Th>
+                    <Th>平均滾動IC</Th>
+                    <Th>IC標準差</Th>
+                    <Th>IR (IC均值/IC標準差)</Th>
+                    <Th>期末累計IC</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {icTableRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
+                        尚未加入任何策略。
+                      </td>
+                    </tr>
+                  )}
+                  {icTableRows.map((row) => (
+                    <tr key={row.id} style={{ borderTop: `1px solid ${S.borderSoft}` }}>
+                      <Td align="left">
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "ui-sans-serif" }}>
+                          <span style={{ width: 8, height: 8, borderRadius: 2, background: row.color, display: "inline-block" }} />
+                          {row.name}
+                        </span>
+                      </Td>
+                      <Td colorize value={row.icMean} S={S}>{row.icMean == null ? "—" : num(row.icMean, 3)}</Td>
+                      <Td>{row.icStd == null ? "—" : num(row.icStd, 3)}</Td>
+                      <Td colorize value={row.ir} S={S}>{row.ir == null ? "—" : num(row.ir, 2)}</Td>
+                      <Td colorize value={row.icExpFinal} S={S}>{row.icExpFinal == null ? "—" : num(row.icExpFinal, 3)}</Td>
                     </tr>
                   ))}
                 </tbody>
