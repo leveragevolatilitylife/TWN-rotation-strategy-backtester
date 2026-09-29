@@ -1058,9 +1058,9 @@ export default function App() {
       paramDefs.push({ key: row.key, label: meta.label, values });
     }
     const total = paramDefs.reduce((a, p) => a * p.values.length, 1);
-    const hardCap = Math.min(2000, Math.max(4, pboMaxCombos));
+    const hardCap = Math.min(20000, Math.max(4, pboMaxCombos));
     if (total > hardCap) {
-      setPboError(`組合數過多（目前 ${total} 組，上限 ${hardCap} 組），請減少參數數量或步數，或調高左側的組合數上限（最多 2000）。`);
+      setPboError(`組合數過多（目前 ${total} 組，上限 ${hardCap} 組），請減少參數數量或步數，或調高左側的組合數上限（最多 20000）。`);
       return;
     }
     if (total < 4) {
