@@ -1058,7 +1058,7 @@ export default function App() {
       paramDefs.push({ key: row.key, label: meta.label, values });
     }
     const total = paramDefs.reduce((a, p) => a * p.values.length, 1);
-    const hardCap = Math.min(20000, Math.max(4, pboMaxCombos));
+    const hardCap = Math.min(20000, Math.max(1, pboMaxCombos));
     if (total > hardCap) {
       setPboError(`組合數過多（目前 ${total} 組，上限 ${hardCap} 組），請減少參數數量或步數，或調高左側的組合數上限（最多 20000）。`);
       return;
@@ -1644,8 +1644,8 @@ export default function App() {
                   value={pboMaxCombos}
                   min={0}
                   max={20000}
-                  step={10}
-                  onChange={(e) => setPboMaxCombos(Math.min(20000, Math.max(4, Number(e.target.value))))}
+                  step={1}
+                  onChange={(e) => setPboMaxCombos(Math.min(20000, Math.max(1, Number(e.target.value))))}
                 />
               </div>
               {(() => {
