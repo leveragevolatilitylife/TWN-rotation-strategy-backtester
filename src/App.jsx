@@ -1558,7 +1558,7 @@ export default function App() {
                 <FlaskConical size={13} color={S.textMuted} />
                 <SectionLabel text="過擬合機率分析 (PBO)" />
               </div>
-              <HintText text="以目前左側設定為基礎，自動變動所選參數產生一組候選策略網格，用 Combinatorially Symmetric Cross-Validation（CSCV）估計回測過擬合機率。網格總組合數上限可自行調整（最多 2000），數字越大運算越久。" />
+              <HintText text="以目前左側設定為基礎，自動變動所選參數產生一組候選策略網格，用 Combinatorially Symmetric Cross-Validation（CSCV）估計回測過擬合機率。網格總組合數上限可自行調整（最多 20000），數字越大運算越久。" />
               {pboParams.map((row, idx) => {
                 const avail = getAvailableParams(draft);
                 const usedElsewhere = new Set(pboParams.filter((_, i) => i !== idx).map((r) => r.key));
@@ -1638,14 +1638,14 @@ export default function App() {
                 </select>
               </div>
               <div style={{ marginBottom: 10 }}>
-                <FieldLabel text="組合數上限（可自行調整，最多 2000）" />
+                <FieldLabel text="組合數上限（可自行調整，最多 20000）" />
                 <input
                   type="number"
                   value={pboMaxCombos}
                   min={4}
-                  max={2000}
+                  max={20000}
                   step={10}
-                  onChange={(e) => setPboMaxCombos(Math.min(2000, Math.max(4, Number(e.target.value))))}
+                  onChange={(e) => setPboMaxCombos(Math.min(20000, Math.max(4, Number(e.target.value))))}
                 />
               </div>
               {(() => {
