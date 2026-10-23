@@ -14,6 +14,7 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
+  ReferenceDot,
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import RAW_DATA from "./data/twn_data.json";
@@ -976,12 +977,14 @@ const pct = (x, digits = 1) => (x == null || Number.isNaN(x) ? "—" : `${(x * 1
 const num = (x, digits = 2) => (x == null || Number.isNaN(x) ? "—" : x.toFixed(digits));
 const fmtMultiple = (x) => `${x.toFixed(3)}x`;
 
-function downsampleForChart(points, target = 480) {
+function downsampleForChart(points, target = 480, keepDates = null) {
   if (points.length <= target) return points;
   const stride = Math.ceil(points.length / target);
   const out = [];
-  for (let i = 0; i < points.length; i += stride) out.push(points[i]);
-  if (out[out.length - 1] !== points[points.length - 1]) out.push(points[points.length - 1]);
+  for (let i = 0; i < points.length; i++) {
+    const isLast = i === points.length - 1;
+    if (i % stride === 0 || isLast || (keepDates && keepDates.has(points[i].date))) out.push(points[i]);
+  }
   return out;
 }
 
@@ -1041,6 +1044,7 @@ export default function App() {
   const [runSeq, setRunSeq] = useState(1);
   const [benchOn, setBenchOn] = useState({ "00631L": true, "0050": true, "00635U": false });
   const [logScale, setLogScale] = useState(false);
+  const [hoverRunKey, setHoverRunKey] = useState(null); // 滑鼠停在哪條策略曲線上（用於浮現換倉標記）
   const [configError, setConfigError] = useState(null);
 
   // PBO（過擬合機率）設定與結果：可自由新增／移除多個參數維度
@@ -1186,6 +1190,8 @@ export default function App() {
     const icRollSeries = [];
     const icExpSeries = [];
     const table = [];
+    const markers = {}; // runId -> [{date, value, kind}]，kind: "toDefense"(轉入00635U) | "toLong"(轉入00631L)
+    const keepDates = new Set();
     const tradeTable = [];
     const distRunsData = [];
     const icTable = [];
@@ -1201,6 +1207,20 @@ export default function App() {
         if (a) prevAsset = a;
       }
       const stats = computeStats(sliced, tradesInRange, run.config.riskFreeRate);
+      // 換倉標記：appliedAsset 在區間內由一檔轉為另一檔的日期（輪動以當日開盤價執行）
+      const runMarkers = [];
+      let prevA = null;
+      for (let i = startIdx; i <= endIdx; i++) {
+        const a = run.appliedAsset[i];
+        if (!a) continue;
+        if (prevA && a !== prevA && (a === "00635U" || a === "00631L")) {
+          const d = slicedDates[i - startIdx];
+          runMarkers.push({ date: d, value: sliced[i - startIdx], kind: a === "00635U" ? "toDefense" : "toLong" });
+          keepDates.add(d);
+        }
+        prevA = a;
+      }
+      markers[run.id] = runMarkers;
       series.push({ key: run.id, name: run.name, color: run.color, dash: false, data: sliced });
       ddSeries.push({ key: run.id, name: run.name, color: run.color, dash: false, data: ddData });
       table.push({
@@ -1286,13 +1306,13 @@ export default function App() {
         for (const s of seriesArr) point[s.key] = s.data[i];
         return point;
       });
-    const chartPoints = downsampleForChart(buildPoints(series), 480);
+    const chartPoints = downsampleForChart(buildPoints(series), 480, keepDates);
     const ddPoints = downsampleForChart(buildPoints(ddSeries), 480);
     const icRollPoints = downsampleForChart(buildPoints(icRollSeries), 480);
     const icExpPoints = downsampleForChart(buildPoints(icExpSeries), 480);
 
     return {
-      chartData: { points: chartPoints, series },
+      chartData: { points: chartPoints, series, markers },
       drawdownChartData: { points: ddPoints, series: ddSeries },
       icChartData: {
         rollingPoints: icRollPoints,
@@ -1838,9 +1858,40 @@ export default function App() {
                         isAnimationActive={false}
                       />
                     ))}
+                    {/* 透明加粗的感應線：讓滑鼠容易停在策略曲線上，不影響圖例與提示框 */}
+                    {chartData.series.filter((s) => chartData.markers[s.key]).map((s) => (
+                      <Line
+                        key={`hover_${s.key}`}
+                        type="monotone"
+                        dataKey={s.key}
+                        stroke="transparent"
+                        strokeWidth={14}
+                        dot={false}
+                        activeDot={false}
+                        legendType="none"
+                        tooltipType="none"
+                        isAnimationActive={false}
+                        onMouseEnter={() => setHoverRunKey(s.key)}
+                        onMouseLeave={() => setHoverRunKey(null)}
+                      />
+                    ))}
+                    {hoverRunKey &&
+                      (chartData.markers[hoverRunKey] || []).map((m, i) => (
+                        <ReferenceDot
+                          key={`${hoverRunKey}_${m.date}_${i}`}
+                          x={m.date}
+                          y={m.value}
+                          ifOverflow="visible"
+                          isFront
+                          shape={(props) => <SwitchArrow cx={props.cx} cy={props.cy} kind={m.kind} S={S} />}
+                        />
+                      ))}
                   </LineChart>
                 </ResponsiveContainer>
               )}
+              <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
+                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由 00631L 輪動至 00635U</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由 00635U 輪動至 00631L</span>（標記於換倉當日的權益位置；Buy &amp; Hold 對照組無換倉標記）。
+              </div>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 22, marginBottom: 10 }}>
@@ -2412,6 +2463,19 @@ function HeatTd({ value, rowMax, mode = "diverge", align = "right", S = THEME, c
       {children}
     </td>
   );
+}
+/* 換倉箭頭：固定小尺寸三角形，綠色朝上畫在曲線下方、紅色朝下畫在曲線上方（類似 TradingView 回測標記） */
+function SwitchArrow({ cx, cy, kind, S }) {
+  if (cx == null || cy == null || Number.isNaN(cx) || Number.isNaN(cy)) return null;
+  const w = 4.5; // 半寬
+  const h = 8; // 高
+  const gap = 3; // 與曲線的間距
+  if (kind === "toDefense") {
+    const tip = cy + gap;
+    return <polygon points={`${cx},${tip} ${cx - w},${tip + h} ${cx + w},${tip + h}`} fill={S.teal} stroke={S.bg} strokeWidth={0.8} style={{ pointerEvents: "none" }} />;
+  }
+  const tip = cy - gap;
+  return <polygon points={`${cx},${tip} ${cx - w},${tip - h} ${cx + w},${tip - h}`} fill={S.rose} stroke={S.bg} strokeWidth={0.8} style={{ pointerEvents: "none" }} />;
 }
 function EmptyState({ S }) {
   return (
