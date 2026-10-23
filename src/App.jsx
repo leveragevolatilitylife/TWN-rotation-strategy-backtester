@@ -1840,7 +1840,11 @@ export default function App() {
                       width={44}
                     />
                     <Tooltip
-                      contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
+                      // 提示框固定在圖左上角空白處（權益曲線由左下往右上走），不跟著滑鼠移動，避免遮住曲線與換倉標記
+                      position={{ x: 52, y: 6 }}
+                      isAnimationActive={false}
+                      wrapperStyle={{ pointerEvents: "none", zIndex: 5 }}
+                      contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11, opacity: 0.94 }}
                       labelStyle={{ color: S.textMuted }}
                       formatter={(v, n) => [fmtMultiple(v), n]}
                     />
