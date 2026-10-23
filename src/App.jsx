@@ -6,6 +6,7 @@ import {
   AreaChart,
   Area,
   BarChart,
+  ComposedChart,
   Bar,
   Cell,
   XAxis,
@@ -360,7 +361,8 @@ function computeStats(equitySlice, tradesInRange, riskFreeRatePct) {
   const winRate =
     dailyReturns.length > 0 ? dailyReturns.filter((r) => r > 0).length / dailyReturns.length : 0;
   const calmar = maxDD !== 0 ? cagr / Math.abs(maxDD) : null;
-  return { totalReturn, cagr, annualVol, sharpe, sortino, maxDD, ulcerIndex, upi, winRate, calmar, trades: tradesInRange };
+  return { totalReturn, cagr, annualVol, sharpe, sortino, maxDD, ulcerIndex, upi, winRate, calmar, trades: tradesInRange,
+    tradeFreqDays: tradesInRange > 0 ? tradingDays / tradesInRange : null };
 }
 
 /* ---------- 交易區間分析（依每次輪動的持倉區間）---------- */
@@ -668,6 +670,94 @@ function histogram(values, bins = 14) {
     counts[idx]++;
   }
   return counts.map((c, i) => ({ bin: min + i * width, label: (min + i * width).toFixed(2), count: c }));
+}
+
+/* 報酬分布比較：固定寬度分箱（每格 5 個百分點），依所有策略的報酬範圍自動延伸覆蓋 */
+const RETURN_DIST_BIN_WIDTH = 0.05;
+
+// Silverman's rule of thumb 頻寬：對極端分布（標準差被離群值撐大）改用 std 與 IQR/1.34 取小者
+function silvermanBandwidth(sortedValues) {
+  const n = sortedValues.length;
+  if (n < 2) return null;
+  const mean = sortedValues.reduce((a, b) => a + b, 0) / n;
+  const variance = sortedValues.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (n - 1);
+  const std = Math.sqrt(variance);
+  const iqr = percentileLinear(sortedValues, 75) - percentileLinear(sortedValues, 25);
+  const spread = iqr > 0 ? Math.min(std, iqr / 1.34) : std;
+  if (!(spread > 0)) return null;
+  const h = 0.9 * spread * Math.pow(n, -1 / 5);
+  return h > 0 ? h : null;
+}
+
+function kdeDensityAt(sortedValues, bandwidth, x) {
+  const n = sortedValues.length;
+  if (n === 0 || !bandwidth) return null;
+  let sum = 0;
+  for (const v of sortedValues) {
+    const z = (x - v) / bandwidth;
+    sum += Math.exp(-0.5 * z * z);
+  }
+  return sum / (n * bandwidth * Math.sqrt(2 * Math.PI));
+}
+
+function buildReturnDistribution(runsData, binWidth = RETURN_DIST_BIN_WIDTH) {
+  const statsByRun = {};
+  let hasData = false;
+
+  // 第一輪：先算每個策略自身的統計量（十分位、Max/Min/平均/標準差），與分箱無關
+  for (const r of runsData) {
+    const n = r.values.length;
+    const sorted = [...r.values].sort((a, b) => a - b);
+    let mean = null, std = null, min = null, max = null;
+    const deciles = [];
+    if (n > 0) {
+      mean = sorted.reduce((a, b) => a + b, 0) / n;
+      std = n > 1 ? Math.sqrt(sorted.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (n - 1)) : 0;
+      min = sorted[0];
+      max = sorted[n - 1];
+      for (let p = 10; p <= 90; p += 10) deciles.push({ p, value: percentileLinear(sorted, p) });
+      hasData = true;
+    }
+    statsByRun[r.id] = { id: r.id, name: r.name, color: r.color, tradeCount: n, mean, std, min, max, deciles, sorted };
+  }
+
+  if (!hasData) return { points: [], hasData: false, statsByRun };
+
+  // 所有策略共用同一組「每格 5 個百分點」的固定分箱，範圍依全部策略的報酬極值自動延伸
+  const all = runsData.flatMap((r) => r.values);
+  const lo = Math.floor(Math.min(...all) / binWidth) * binWidth;
+  const hi = Math.ceil(Math.max(...all) / binWidth) * binWidth;
+  const numBins = Math.max(1, Math.round((hi - lo) / binWidth));
+
+  const points = [];
+  for (let i = 0; i < numBins; i++) {
+    const binLo = lo + i * binWidth;
+    const binHi = binLo + binWidth;
+    points.push({ bin: `${(binLo * 100).toFixed(0)}~${(binHi * 100).toFixed(0)}%`, center: binLo + binWidth / 2 });
+  }
+
+  for (const r of runsData) {
+    const st = statsByRun[r.id];
+    const n = st.tradeCount;
+    // 當交易報酬高度集中（如大量近乎相同金額的停損出場）時，IQR 可能塌縮到接近 0，
+    // 導致 Silverman 頻寬失真為近似 0；設下限（分箱寬度的 1/4）避免 KDE 曲線退化成看不見的尖峰。
+    const rawBandwidth = n > 1 ? silvermanBandwidth(st.sorted) : null;
+    const bandwidth = rawBandwidth ? Math.max(rawBandwidth, binWidth / 4) : null;
+    const counts = new Array(numBins).fill(0);
+    for (const v of r.values) {
+      let idx = Math.floor((v - lo) / binWidth);
+      if (idx >= numBins) idx = numBins - 1;
+      if (idx < 0) idx = 0;
+      counts[idx]++;
+    }
+    points.forEach((pt, i) => {
+      pt[r.id] = n > 0 ? (counts[i] / n) * 100 : 0;
+      const density = bandwidth ? kdeDensityAt(st.sorted, bandwidth, pt.center) : null;
+      pt[`${r.id}__kde`] = density == null ? null : density * binWidth * 100;
+    });
+  }
+
+  return { points, hasData, statsByRun };
 }
 
 function cartesianProduct(paramDefs) {
@@ -1058,9 +1148,9 @@ export default function App() {
       paramDefs.push({ key: row.key, label: meta.label, values });
     }
     const total = paramDefs.reduce((a, p) => a * p.values.length, 1);
-    const hardCap = Math.min(20000, Math.max(1, pboMaxCombos));
+    const hardCap = Math.min(2000, Math.max(4, pboMaxCombos));
     if (total > hardCap) {
-      setPboError(`組合數過多（目前 ${total} 組，上限 ${hardCap} 組），請減少參數數量或步數，或調高左側的組合數上限（最多 20000）。`);
+      setPboError(`組合數過多（目前 ${total} 組，上限 ${hardCap} 組），請減少參數數量或步數，或調高左側的組合數上限（最多 2000）。`);
       return;
     }
     if (total < 4) {
@@ -1085,7 +1175,7 @@ export default function App() {
   }, [draft, pboParams, pboBlocks, pboMaxCombos, dataset, rangeIdx]);
 
   /* ---- 依目前日期範圍，切片＋重新正規化每個 run ＋ benchmark ---- */
-  const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, icTableRows } = useMemo(() => {
+  const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, tradeDistribution, icTableRows } = useMemo(() => {
     const { startIdx, endIdx } = rangeIdx;
     const slicedDates = dataset.dates.slice(startIdx, endIdx + 1);
     const rangeStartDate = slicedDates[0];
@@ -1097,6 +1187,7 @@ export default function App() {
     const icExpSeries = [];
     const table = [];
     const tradeTable = [];
+    const distRunsData = [];
     const icTable = [];
 
     for (const run of runs) {
@@ -1117,7 +1208,11 @@ export default function App() {
         name: run.name,
         color: run.color,
         isBench: false,
-        lastAsset: run.lastAsset,
+        // 最新持倉：依「目前所選日期區間的結束日」回頭找最後一個有效持倉（不可使用建立 run 時快取的值）
+        lastAsset: (() => {
+          for (let i = endIdx; i >= 0; i--) if (run.appliedAsset[i]) return run.appliedAsset[i];
+          return null;
+        })(),
         ...stats,
       });
 
@@ -1127,6 +1222,12 @@ export default function App() {
       );
       const tstats = computeTradeStats(tradesInWindow);
       tradeTable.push({ id: run.id, name: run.name, color: run.color, ...tstats });
+      distRunsData.push({
+        id: run.id,
+        name: run.name,
+        color: run.color,
+        values: tradesInWindow.filter((t) => !t.open).map((t) => t.returnPct),
+      });
 
       // IC / IR 分析
       const icRollSliced = sliceRaw(run.icRolling, startIdx, endIdx);
@@ -1201,6 +1302,7 @@ export default function App() {
       },
       tableRows: table,
       tradeTableRows: tradeTable,
+      tradeDistribution: buildReturnDistribution(distRunsData),
       icTableRows: icTable,
     };
   }, [runs, benchOn, dataset, rangeIdx]);
@@ -1377,7 +1479,7 @@ export default function App() {
             />
             {draft.vixEnabled && (
               <div style={{ marginBottom: 18, paddingLeft: 2 }}>
-                <FieldLabel text="滾動視窗（交易日，約 4 年 = 1000）" />
+                <FieldLabel text="滾動視窗（交易日，約 4 年 = 1008）" />
                 <input type="number" value={draft.vixLookback} min={60} max={2500} step={10} onChange={(e) => setDraft((d) => ({ ...d, vixLookback: Number(e.target.value) }))} />
                 <div style={{ marginTop: 10 }}>
                   <FieldLabel text="門檻模式" />
@@ -1558,7 +1660,7 @@ export default function App() {
                 <FlaskConical size={13} color={S.textMuted} />
                 <SectionLabel text="過擬合機率分析 (PBO)" />
               </div>
-              <HintText text="以目前左側設定為基礎，自動變動所選參數產生一組候選策略網格，用 Combinatorially Symmetric Cross-Validation（CSCV）估計回測過擬合機率。網格總組合數上限可自行調整（最多 20000），數字越大運算越久。" />
+              <HintText text="以目前左側設定為基礎，自動變動所選參數產生一組候選策略網格，用 Combinatorially Symmetric Cross-Validation（CSCV）估計回測過擬合機率。網格總組合數上限可自行調整（最多 2000），數字越大運算越久。" />
               {pboParams.map((row, idx) => {
                 const avail = getAvailableParams(draft);
                 const usedElsewhere = new Set(pboParams.filter((_, i) => i !== idx).map((r) => r.key));
@@ -1638,14 +1740,14 @@ export default function App() {
                 </select>
               </div>
               <div style={{ marginBottom: 10 }}>
-                <FieldLabel text="組合數上限（可自行調整，最多 20000）" />
+                <FieldLabel text="組合數上限（可自行調整，最多 2000）" />
                 <input
                   type="number"
                   value={pboMaxCombos}
-                  min={0}
-                  max={20000}
-                  step={1}
-                  onChange={(e) => setPboMaxCombos(Math.min(20000, Math.max(1, Number(e.target.value))))}
+                  min={4}
+                  max={2000}
+                  step={10}
+                  onChange={(e) => setPboMaxCombos(Math.min(2000, Math.max(4, Number(e.target.value))))}
                 />
               </div>
               {(() => {
@@ -1804,12 +1906,13 @@ export default function App() {
                     <Th>Calmar</Th>
                     <Th>日勝率</Th>
                     <Th>換手次數</Th>
+                    <Th>交易頻率(天/次)</Th>
                   </tr>
                 </thead>
                 <tbody>
                   {tableRows.length === 0 && (
                     <tr>
-                      <td colSpan={13} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
+                      <td colSpan={14} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
                         尚未加入任何策略或對照組。
                       </td>
                     </tr>
@@ -1840,6 +1943,7 @@ export default function App() {
                       <Td>{row.calmar == null ? "—" : num(row.calmar)}</Td>
                       <Td>{pct(row.winRate)}</Td>
                       <Td>{row.trades}</Td>
+                      <Td>{row.tradeFreqDays == null ? "—" : num(row.tradeFreqDays, 1)}</Td>
                     </tr>
                   ))}
                 </tbody>
@@ -1892,6 +1996,165 @@ export default function App() {
                   ))}
                 </tbody>
               </table>
+            </div>
+
+            <div style={{ marginTop: 18, marginBottom: 8, fontSize: 13, fontWeight: 600 }}>各策略報酬分布比較（每次輪動持倉的報酬率%，固定區間）</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 6, padding: "10px 8px 4px" }}>
+                {!tradeDistribution.hasData ? (
+                  <EmptyState S={S} />
+                ) : (
+                  <ResponsiveContainer width="100%" height={320}>
+                    <ComposedChart data={tradeDistribution.points} margin={{ top: 6, right: 12, bottom: 4, left: 0 }}>
+                      <CartesianGrid stroke={S.borderSoft} vertical={false} />
+                      <XAxis
+                        dataKey="bin"
+                        tick={{ fontSize: 9, fill: S.textFaint }}
+                        stroke={S.border}
+                        angle={-40}
+                        textAnchor="end"
+                        height={46}
+                        interval={0}
+                      />
+                      <YAxis
+                        tick={{ fontSize: 9, fill: S.textFaint }}
+                        stroke={S.border}
+                        width={36}
+                        tickFormatter={(v) => `${v}%`}
+                      />
+                      <Tooltip
+                        contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
+                        labelStyle={{ color: S.textMuted }}
+                        formatter={(v, n) => [v == null ? "—" : `${v.toFixed(1)}%`, n]}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      {tradeTableRows.map((row) => (
+                        <Bar key={row.id} dataKey={row.id} name={row.name} fill={row.color} fillOpacity={0.55} />
+                      ))}
+                      {tradeTableRows.map((row) => (
+                        <Line
+                          key={`${row.id}__kde`}
+                          type="monotone"
+                          dataKey={`${row.id}__kde`}
+                          name={`${row.name}（KDE）`}
+                          stroke={row.color}
+                          strokeWidth={1.8}
+                          dot={false}
+                          isAnimationActive={false}
+                          connectNulls
+                          legendType="none"
+                        />
+                      ))}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                )}
+                <div style={{ fontSize: 10.5, color: S.textFaint, padding: "6px 2px 10px", lineHeight: 1.6 }}>
+                  X 軸為每筆交易報酬率（%），以 5 個百分點為一格的固定區間（依所有策略的報酬範圍自動延伸覆蓋）；長條（Y 軸）為該策略落在此區間的交易筆數占自身全部交易的百分比。疊加曲線為以 Silverman 法則估計頻寬的高斯核密度估計（KDE，已換算成與長條同一單位），僅標示曲線本身、不標出資料點，用以顯示分布形狀的近似走勢。只計入已平倉、完整落於所選日期範圍內的交易，與上方「交易分析」表為同一批交易。
+                </div>
+              </div>
+
+              <div style={{ overflowX: "auto", border: `1px solid ${S.border}`, borderRadius: 6 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }} className="mono">
+                  <thead>
+                    <tr style={{ background: S.panelAlt }}>
+                      <Th align="left">指標</Th>
+                      {tradeTableRows.map((row) => (
+                        <Th key={row.id}>
+                          <span
+                            title={row.name}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 4,
+                              maxWidth: 140,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            <span style={{ width: 7, height: 7, borderRadius: 2, background: row.color, flexShrink: 0, display: "inline-block" }} />
+                            {row.name}
+                          </span>
+                        </Th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tradeTableRows.length === 0 && (
+                      <tr>
+                        <td colSpan={1 + tradeTableRows.length} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
+                          尚未加入任何策略。
+                        </td>
+                      </tr>
+                    )}
+                    {[10, 20, 30, 40, 50, 60, 70, 80, 90].map((p) => {
+                      const rowValues = tradeTableRows.map((row) => {
+                        const st = tradeDistribution.statsByRun[row.id];
+                        const d = st && st.deciles.find((x) => x.p === p);
+                        return d ? d.value : null;
+                      });
+                      const rowMax = Math.max(0, ...rowValues.filter((v) => v != null).map((v) => Math.abs(v)));
+                      return (
+                        <tr key={p} style={{ borderTop: `1px solid ${S.borderSoft}` }}>
+                          <Td align="left">P{p}</Td>
+                          {tradeTableRows.map((row, i) => {
+                            const v = rowValues[i];
+                            return (
+                              <HeatTd key={row.id} value={v} rowMax={rowMax} mode="diverge" S={S}>
+                                {v == null ? "—" : pct(v)}
+                              </HeatTd>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    {[
+                      { label: "Max", get: (st) => (st ? st.max : null) },
+                      { label: "Min", get: (st) => (st ? st.min : null) },
+                      { label: "平均報酬", get: (st) => (st ? st.mean : null) },
+                    ].map(({ label, get }) => {
+                      const rowValues = tradeTableRows.map((row) => get(tradeDistribution.statsByRun[row.id]));
+                      const rowMax = Math.max(0, ...rowValues.filter((v) => v != null).map((v) => Math.abs(v)));
+                      return (
+                        <tr key={label} style={{ borderTop: `1px solid ${S.borderSoft}` }}>
+                          <Td align="left">{label}</Td>
+                          {tradeTableRows.map((row, i) => {
+                            const v = rowValues[i];
+                            return (
+                              <HeatTd key={row.id} value={v} rowMax={rowMax} mode="diverge" S={S}>
+                                {v == null ? "—" : pct(v)}
+                              </HeatTd>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    {(() => {
+                      const rowValues = tradeTableRows.map((row) => {
+                        const st = tradeDistribution.statsByRun[row.id];
+                        return st ? st.std : null;
+                      });
+                      const rowMax = Math.max(0, ...rowValues.filter((v) => v != null));
+                      return (
+                        <tr style={{ borderTop: `1px solid ${S.borderSoft}` }}>
+                          <Td align="left">標準差</Td>
+                          {tradeTableRows.map((row, i) => {
+                            const v = rowValues[i];
+                            return (
+                              <HeatTd key={row.id} value={v} rowMax={rowMax} mode="sequential" S={S}>
+                                {v == null ? "—" : pct(v)}
+                              </HeatTd>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ fontSize: 10, color: S.textFaint, padding: "2px 2px 0" }}>
+                色階依「同一列」在所選策略間的相對高低自動調整：報酬相關列（P10~P90、Max、Min、平均報酬）以 0 為中心，teal 為正、rose 為負，顏色愈深代表數值相對同列其他策略愈極端；標準差列以 gold 單色呈現相對大小。
+              </div>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 22, marginBottom: 10 }}>
@@ -2122,6 +2385,32 @@ function Td({ children, align = "right", colorize = false, value = 0, S = THEME 
   if (colorize) color = value > 0 ? S.teal : value < 0 ? S.rose : S.text;
   return (
     <td style={{ padding: "7px 10px", textAlign: align, whiteSpace: "nowrap", color }}>{children}</td>
+  );
+}
+function hexToRgba(hex, alpha) {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+/* 色階表格格子：依「同一列」數值的相對大小決定底色深淺
+   mode="diverge"：以 0 為中心，正值 teal／負值 rose，強度 = |value| / 該列最大絕對值
+   mode="sequential"：數值恆為正（如標準差），強度 = value / 該列最大值，統一用 gold */
+function HeatTd({ value, rowMax, mode = "diverge", align = "right", S = THEME, children }) {
+  let bg = "transparent";
+  let color = S.text;
+  if (value != null && rowMax > 0) {
+    const ratio = Math.min(1, Math.abs(value) / rowMax);
+    const alpha = 0.08 + ratio * 0.52;
+    const hex = mode === "diverge" ? (value >= 0 ? S.teal : S.rose) : S.gold;
+    bg = hexToRgba(hex, alpha);
+    if (alpha > 0.38) color = "#0b0f14";
+  }
+  return (
+    <td style={{ padding: "7px 10px", textAlign: align, whiteSpace: "nowrap", background: bg, color }}>
+      {children}
+    </td>
   );
 }
 function EmptyState({ S }) {
