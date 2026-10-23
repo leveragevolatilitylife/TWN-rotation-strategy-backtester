@@ -1890,7 +1890,7 @@ export default function App() {
                 </ResponsiveContainer>
               )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由 00631L 輪動至 00635U</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由 00635U 輪動至 00631L</span>（標記於換倉當日的權益位置；Buy &amp; Hold 對照組無換倉標記）。
+                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由 00635U 輪動至 00631L</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由 00631L 輪動至 00635U</span>（標記於換倉當日的權益位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
@@ -2463,13 +2463,13 @@ function HeatTd({ value, rowMax, mode = "diverge", align = "right", S = THEME, c
     </td>
   );
 }
-/* 換倉箭頭：固定小尺寸三角形，綠色朝上畫在曲線下方、紅色朝下畫在曲線上方（類似 TradingView 回測標記） */
+/* 換倉箭頭：固定小尺寸三角形（類似 TradingView 回測標記）：轉入 00631L＝綠色朝上、畫在曲線下方；轉入 00635U＝紅色朝下、畫在曲線上方 */
 function SwitchArrow({ cx, cy, kind, S }) {
   if (cx == null || cy == null || Number.isNaN(cx) || Number.isNaN(cy)) return null;
   const w = 4.5; // 半寬
   const h = 8; // 高
   const gap = 3; // 與曲線的間距
-  if (kind === "toDefense") {
+  if (kind === "toLong") {
     const tip = cy + gap;
     return <polygon points={`${cx},${tip} ${cx - w},${tip + h} ${cx + w},${tip + h}`} fill={S.teal} stroke={S.bg} strokeWidth={0.8} style={{ pointerEvents: "none" }} />;
   }
