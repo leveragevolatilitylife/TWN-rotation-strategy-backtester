@@ -2450,13 +2450,12 @@ function hexToRgba(hex, alpha) {
    mode="sequential"：數值恆為正（如標準差），強度 = value / 該列最大值，統一用 gold */
 function HeatTd({ value, rowMax, mode = "diverge", align = "right", S = THEME, children }) {
   let bg = "transparent";
-  let color = S.text;
+  const color = "#ffffff"; // 色階格子文字一律白色
   if (value != null && rowMax > 0) {
     const ratio = Math.min(1, Math.abs(value) / rowMax);
     const alpha = 0.08 + ratio * 0.52;
     const hex = mode === "diverge" ? (value >= 0 ? S.teal : S.rose) : S.gold;
     bg = hexToRgba(hex, alpha);
-    if (alpha > 0.38) color = "#0b0f14";
   }
   return (
     <td style={{ padding: "7px 10px", textAlign: align, whiteSpace: "nowrap", background: bg, color }}>
