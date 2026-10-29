@@ -1354,7 +1354,7 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
-              台股輪動策略回測工作台 <span style={{ fontSize: 12, fontWeight: 500, color: S.textFaint }}>v2</span>
+              台股輪動策略回測平台 <span style={{ fontSize: 12, fontWeight: 500, color: S.textFaint }}>v2</span>
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ 0050 均線乖離率 輪動邏輯・可自由調參數並排比較・已預載 5 組每日追蹤儀表板預設策略
