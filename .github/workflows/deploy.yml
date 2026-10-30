@@ -3,9 +3,16 @@ name: Build and deploy to GitHub Pages
 # 觸發時機：
 #  1. push 到 main 分支的任何變更（含程式碼、或您上傳新版 data/Stock_data_collection.xlsx）
 #  2. 也可以在 GitHub 網頁的 Actions 分頁手動點擊執行（workflow_dispatch）
+#  3. 每天台灣時間約 08:07 自動執行（schedule）：從私有 repo「stock-data-collection」的 data 分支
+#     抓最新的 Stock_data_collection.xlsx，重新解析並部署。
+#     需先在本 repo 設定 Secret「DATA_REPO_TOKEN」（唯讀 Contents 權限的 fine-grained PAT）。
 on:
   push:
     branches: [main]
+  schedule:
+    # GitHub 的排程以 UTC 計：23:07 UTC = 台灣時間隔日 07:07 → 這裡用 00:07 UTC = 台灣 08:07
+    # 避開整點（整點排程常被延遲或跳過），實際執行時間可能晚幾分鐘到十幾分鐘
+    - cron: "7 0 * * *"
   workflow_dispatch:
 
 # GitHub Pages（用官方 Actions 部署方式）需要的權限
@@ -34,6 +41,23 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # 從資料 repo（私有）的 data 分支抓最新 xlsx，覆蓋 data/Stock_data_collection.xlsx
+      # - 未設定 DATA_REPO_TOKEN：略過並警告，沿用本 repo 內已提交的 xlsx（push 觸發的部署不會因此失敗）
+      # - 已設定但抓取失敗（token 過期/權限不足）：讓這次建置失敗，避免悄悄用舊資料上線
+      - name: Fetch latest data from stock-data-collection
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          if [ -z "$DATA_REPO_TOKEN" ]; then
+            echo "::warning::未設定 DATA_REPO_TOKEN，沿用 repo 內 data/Stock_data_collection.xlsx"
+            exit 0
+          fi
+          git clone --depth 1 --branch data \
+            "https://x-access-token:${DATA_REPO_TOKEN}@github.com/leveragevolatilitylife/stock-data-collection.git" \
+            "$RUNNER_TEMP/datarepo"
+          cp "$RUNNER_TEMP/datarepo/Stock_data_collection.xlsx" data/Stock_data_collection.xlsx
+          ls -l data/Stock_data_collection.xlsx
 
       # 這一步會讀取 data/Stock_data_collection.xlsx，重新產生 src/data/twn_data.json
       # 只要您把新版 xlsx 檔覆蓋掉 data/Stock_data_collection.xlsx 並 push，
