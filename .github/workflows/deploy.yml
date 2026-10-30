@@ -50,10 +50,38 @@ jobs:
             echo "::warning::未設定 DATA_REPO_TOKEN，沿用 repo 內 data/Stock_data_collection.xlsx"
             exit 0
           fi
-          git clone --depth 1 --branch data \
-            "https://x-access-token:${DATA_REPO_TOKEN}@github.com/leveragevolatilitylife/stock-data-collection.git" \
-            "$RUNNER_TEMP/datarepo"
-          cp "$RUNNER_TEMP/datarepo/Stock_data_collection.xlsx" data/Stock_data_collection.xlsx
+          TOKEN="$(printf '%s' "$DATA_REPO_TOKEN" | tr -d '[:space:]')"   # 去掉貼上時可能夾帶的空白／換行
+          API="https://api.github.com/repos/leveragevolatilitylife/stock-data-collection"
+          H=(-H "Authorization: Bearer $TOKEN" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          echo "--- 診斷資訊（不含金鑰內容） ---"
+          case "$TOKEN" in
+            github_pat_*) echo "token 類型：fine-grained PAT";;
+            ghp_*)        echo "token 類型：classic PAT";;
+            ghs_*)        echo "token 類型：GitHub App / Actions 內建 token（不是 PAT，無法讀其他 repo）";;
+            *)            echo "token 類型：無法辨識（長度 ${#TOKEN}）";;
+          esac
+          code=$(curl -sS -o /tmp/me.json -w '%{http_code}' "${H[@]}" https://api.github.com/user || true)
+          echo "GET /user -> HTTP $code $(grep -m1 '"login"' /tmp/me.json 2>/dev/null || true)"
+          code=$(curl -sS -o /tmp/repo.json -D /tmp/repo.hdr -w '%{http_code}' "${H[@]}" "$API" || true)
+          echo "GET repo -> HTTP $code（404 = 這把 token 看不到該 repo，未勾選 repo 或擁有者不對）"
+          grep -i '^x-accepted-github-permissions' /tmp/repo.hdr || true
+
+          # 以 Contents API 下載 data 分支的檔案（比 git clone 的錯誤訊息清楚）
+          code=$(curl -sS -L -o /tmp/data.xlsx -D /tmp/dl.hdr -w '%{http_code}' "${H[@]}" \
+            -H "Accept: application/vnd.github.raw" \
+            "$API/contents/Stock_data_collection.xlsx?ref=data" || true)
+          echo "GET contents -> HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::下載失敗 (HTTP $code)。回應內容："; head -c 600 /tmp/data.xlsx; echo
+            grep -i '^x-accepted-github-permissions' /tmp/dl.hdr || true
+            echo "::error::請確認 fine-grained token：Repository access 已勾選 stock-data-collection，且 Contents = Read-only"
+            exit 1
+          fi
+          if [ "$(head -c 2 /tmp/data.xlsx)" != "PK" ] || [ "$(stat -c%s /tmp/data.xlsx)" -lt 100000 ]; then
+            echo "::error::下載到的內容不像有效的 xlsx（大小 $(stat -c%s /tmp/data.xlsx) bytes）"; exit 1
+          fi
+          cp /tmp/data.xlsx data/Stock_data_collection.xlsx
           ls -l data/Stock_data_collection.xlsx
 
       # 這一步會讀取 data/Stock_data_collection.xlsx，重新產生 src/data/twn_data.json
