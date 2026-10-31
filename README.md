@@ -110,6 +110,6 @@ twn-rotation-backtester/
 ## 多標的／美股測試分支（feature/multi-asset）
 
 - **標的自動偵測**：Excel 市場分頁中，欄位標題為 `<代號> price`（收盤）與 `<代號> open price`（開盤）的標的會自動出現在「多方／空方持有」與對照組選單；只有收盤價的標的（如 IX0001、2330）只能當「訊號標的」。之後新增 ETF 只要照這個命名在 Excel 加欄位，不需改程式。
-- **市場分頁**：台股＝`TWN historical data`（錨點 0050）、美股 VTS＝`VTS historical data`（錨點 SPY）、美股 NASDAQ＝`NASDAQ historical data`（錨點 QQQ；欄位標題用 `Close`／`Open` 也能辨識）。頁面上方可切換市場，各市場有各自的比較清單與回測期間。
+- **市場**：目前只保留台股（`TWN historical data`，錨點 0050）；美股 VTS／NASDAQ 已停用，解析程式與前端的多市場架構仍保留，需要時在 `scripts/parse-xlsx.mjs` 的 `MARKETS` 與 `src/App.jsx` 的 `MARKET_META` 加回即可。
 - **佔位資料提示**：標的上市前在 Excel 內是回填的固定價格，App 會偵測並在所選標的較晚上市時提示真實行情的起始日。
 - **測試分支不會上線**：push 到 `feature/**` 只會建置並產生 artifact `site-preview`（Actions 執行頁面最下方可下載，保留 14 天）。下載解壓後在該資料夾執行 `npx serve .` 即可在本機預覽；確認後再把分支合併進 `main` 才會正式部署。

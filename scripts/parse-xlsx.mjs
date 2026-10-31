@@ -35,9 +35,7 @@ const outputPath = path.resolve(repoRoot, process.argv[3] || "src/data/market_da
 
 const MARKETS = [
   { key: "TW", sheetMatch: (name) => name.includes("TWN") && name.includes("historical"), anchor: "0050", required: true },
-  { key: "US", sheetMatch: (name) => name.includes("VTS") && name.includes("historical"), anchor: "SPY", required: false },
-  // NASDAQ 分頁的 SPY 只有收盤價（沒有開盤價），所以錨點改用有開盤價的 QQQ
-  { key: "NQ", sheetMatch: (name) => name.includes("NASDAQ") && name.includes("historical"), anchor: "QQQ", required: false },
+  // 美股分頁（VTS／NASDAQ）已停用：只保留台股。
 ];
 
 function normalizeHeader(h) {
