@@ -78,7 +78,7 @@ function parseMarket(wb, market) {
     const msg = `[parse-xlsx] 找不到市場 ${market.key} 的分頁。現有分頁：${wb.SheetNames.join("、")}`;
     if (market.required) {
       console.error(msg);
-      process.exit(1);
+      throw new Error("PARSE_FAIL");
     }
     console.warn(msg + "（略過）");
     return null;
@@ -97,7 +97,7 @@ function parseMarket(wb, market) {
     console.error(`[parse-xlsx] ${market.key}：找不到標題列（需含「Date」欄）。分頁「${sheetName}」前 3 列：`);
     for (let i = 0; i < Math.min(3, rows.length); i++) console.error(`  第${i + 1}列: ${JSON.stringify(rows[i])}`);
     console.error(`[parse-xlsx] 這個檔案共有 ${wb.SheetNames.length} 個分頁：${wb.SheetNames.join("、")}`);
-    process.exit(1);
+    throw new Error("PARSE_FAIL");
   }
 
   const header = rows[headerRowIdx].map(normalizeHeader);
@@ -132,7 +132,7 @@ function parseMarket(wb, market) {
   const anchorKey = tickers.find((t) => t === market.anchor.toLowerCase());
   if (!anchorKey || assetCols.get(anchorKey).open < 0) {
     console.error(`[parse-xlsx] ${market.key}：錨點標的 ${market.anchor} 缺少收盤價或開盤價欄位。偵測到的標的：${tickers.join(", ")}`);
-    process.exit(1);
+    throw new Error("PARSE_FAIL");
   }
 
   // 1) 依錨點標的篩出有效日期列
@@ -158,7 +158,7 @@ function parseMarket(wb, market) {
   }
   if (kept.length < 30) {
     console.error(`[parse-xlsx] ${market.key}：有效資料列太少（${kept.length} 筆），請確認檔案內容。`);
-    process.exit(1);
+    throw new Error("PARSE_FAIL");
   }
 
   // 2) 各標的序列：缺值處理（中間缺值往前補；開頭缺值以第一筆有效值回填）
@@ -203,7 +203,15 @@ function main() {
   const wb = XLSX.read(fs.readFileSync(inputPath), { type: "buffer", cellDates: true });
   const result = {};
   for (const m of MARKETS) {
-    const parsed = parseMarket(wb, m);
+    let parsed = null;
+    try {
+      parsed = parseMarket(wb, m);
+    } catch (e) {
+      if (e.message !== "PARSE_FAIL") throw e;
+      if (m.required) process.exit(1);
+      // 選填市場（美股）解析失敗：例如資料來源的 Excel 該分頁還是舊版面。略過該市場，不讓整個建置失敗。
+      console.warn(`[parse-xlsx] ⚠ 市場 ${m.key} 解析失敗（見上方訊息），已略過；其他市場照常產生。`);
+    }
     if (parsed) result[m.key] = parsed;
   }
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
