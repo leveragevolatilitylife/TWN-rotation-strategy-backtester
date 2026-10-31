@@ -4,10 +4,11 @@
 //
 // 支援的市場分頁（MARKETS）：
 //   TW：「TWN historical data」（錨點標的 0050）
-//   US：「VTS historical data」（錨點標的 SPY）；找不到這個分頁時略過美股（只警告，不中斷）
+//   US：「VTS historical data」（錨點標的 SPY）；NQ：「NASDAQ historical data」（錨點標的 QQQ）
+//   找不到美股分頁時略過該市場（只警告，不中斷）
 //
 // 標的欄位自動偵測（欄位標題正規化＝去空白、轉小寫後比對）：
-//   「<代號>price」＝收盤價、「<代號>openprice」＝開盤價；之後新增 ETF 只要照這個命名加欄位即可，
+//   「<代號>price」或「<代號>close」＝收盤價、「<代號>openprice」或「<代號>open」＝開盤價；之後新增 ETF 只要照這個命名加欄位即可，
 //   不需要改程式。只有收盤價（如 IX0001、2330）的標的只能當「訊號標的」，不能當輪動持有標的。
 // 選填欄位：任何包含 "rollyield" 的欄位（VX30:VIX Roll Yield）、"vix"（VIX）
 // 列的取捨：只保留「錨點標的」收盤＋開盤價都有值的日期；其他標的的缺值會往前／往後補值
@@ -35,6 +36,8 @@ const outputPath = path.resolve(repoRoot, process.argv[3] || "src/data/market_da
 const MARKETS = [
   { key: "TW", sheetMatch: (name) => name.includes("TWN") && name.includes("historical"), anchor: "0050", required: true },
   { key: "US", sheetMatch: (name) => name.includes("VTS") && name.includes("historical"), anchor: "SPY", required: false },
+  // NASDAQ 分頁的 SPY 只有收盤價（沒有開盤價），所以錨點改用有開盤價的 QQQ
+  { key: "NQ", sheetMatch: (name) => name.includes("NASDAQ") && name.includes("historical"), anchor: "QQQ", required: false },
 ];
 
 function normalizeHeader(h) {
@@ -100,27 +103,29 @@ function parseMarket(wb, market) {
   const header = rows[headerRowIdx].map(normalizeHeader);
   const dateCol = header.indexOf("date");
   const rollCol = header.findIndex((h) => h.includes("rollyield"));
-  const vixCol = header.indexOf("vix");
+  // VIX 欄：優先找剛好叫「vix」的欄；否則找以 vix 開頭、但不是 VIX9D 的欄（如 "VIX (1 month)"）
+  let vixCol = header.indexOf("vix");
+  if (vixCol === -1) vixCol = header.findIndex((h) => h.startsWith("vix") && !h.startsWith("vix9d"));
 
   // 偵測標的：<代號>price / <代號>openprice（排除 dailychange、rolling…等衍生欄位）
   // 同一個代號若在「重複的表頭區」出現第二次，只取第一個。
   const assetCols = new Map(); // ticker -> { close, open }
   header.forEach((h, ci) => {
-    const m = /^(.+?)(openprice|price)$/.exec(h);
+    const m = /^(.+?)(openprice|open|price|close)$/.exec(h);
     if (!m) return;
+    const isOpen = m[2] === "openprice" || m[2] === "open";
     const ticker = m[1];
     if (/daily|rolling|change|beta|correlation|roll/.test(ticker)) return;
     const rec = assetCols.get(ticker) || { close: -1, open: -1 };
-    if (m[2] === "price" && rec.close === -1) rec.close = ci;
-    if (m[2] === "openprice" && rec.open === -1) rec.open = ci;
+    if (!isOpen && rec.close === -1) rec.close = ci;
+    if (isOpen && rec.open === -1) rec.open = ci;
     assetCols.set(ticker, rec);
   });
   // 還原原始大小寫代號（標題列去空白後的原文，例如 "00631L"）
   const rawTicker = (ticker) => {
     const ci = assetCols.get(ticker).close;
-    const raw = String(rows[headerRowIdx][ci] ?? "").replace(/\s+/g, " ").trim();
-    const mm = /^(\S+)\s+(open\s+)?price/i.exec(raw);
-    return mm ? mm[1] : ticker.toUpperCase();
+    const first = String(rows[headerRowIdx][ci] ?? "").trim().split(/\s+/)[0];
+    return first && first.toLowerCase() !== ticker ? first : first || ticker.toUpperCase();
   };
   const tickers = [...assetCols.entries()].filter(([, v]) => v.close >= 0).map(([t]) => t);
 
@@ -142,6 +147,15 @@ function parseMarket(wb, market) {
     kept.push({ dateStr, r });
   }
   kept.sort((x, y) => (x.dateStr < y.dateStr ? -1 : x.dateStr > y.dateStr ? 1 : 0));
+  // VX30 Roll Yield 欄位若開頭有空白（如 NASDAQ 分頁 2004-03 之前），砍掉這些列，
+  // 避免空值被當成 0 混進 VIX 百分位的滾動視窗。
+  if (rollCol >= 0) {
+    const firstRoll = kept.findIndex(({ r }) => num(r[rollCol]) != null);
+    if (firstRoll > 0) {
+      console.log(`[parse-xlsx] ${market.key}：前 ${firstRoll} 列沒有 Roll Yield（${kept[0].dateStr} ～ ${kept[firstRoll - 1].dateStr}），已略過`);
+      kept.splice(0, firstRoll);
+    }
+  }
   if (kept.length < 30) {
     console.error(`[parse-xlsx] ${market.key}：有效資料列太少（${kept.length} 筆），請確認檔案內容。`);
     process.exit(1);
