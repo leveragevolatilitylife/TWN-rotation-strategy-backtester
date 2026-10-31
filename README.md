@@ -52,7 +52,7 @@ npm run preview    # 本機預覽建置後的成品
 2. `git add data/Stock_data_collection.xlsx && git commit -m "Update stock data" && git push`。
 3. Push 上去之後，GitHub Actions 會自動：
    - 讀取新的 `data/Stock_data_collection.xlsx`
-   - 執行 `scripts/parse-xlsx.mjs`，重新產生 `src/data/twn_data.json`
+   - 執行 `scripts/parse-xlsx.mjs`，重新產生 `src/data/market_data.json`
    - 重新建置整個網站並部署
 
    **您完全不需要手動跑指令或改程式碼**，push 上去等 Actions 跑完（通常1-2分鐘）就會自動更新。也可以直接在 GitHub 網頁上，進到 `data/` 資料夾點 `Stock_data_collection.xlsx` 旁邊的鉛筆／上傳按鈕直接換檔，一樣會觸發自動部署。
@@ -63,7 +63,7 @@ npm run preview    # 本機預覽建置後的成品
    npm run parse-data
    ```
 
-   這會直接重新產生 `src/data/twn_data.json`，可以打開來看看筆數、起訖日期對不對，再一起 commit push。
+   這會直接重新產生 `src/data/market_data.json`，可以打開來看看筆數、起訖日期對不對，再一起 commit push。
 
 **欄位需求**：xlsx 需含「TWN historical data」分頁，且欄位（標題列）需包含：`Date`、`0050 price`、`0050 open price`、`00631L price`、`00631L open price`、`00635U price`、`00635U open price`；`VX30:VIX Roll Yield`與`VIX`為選填（缺少的話 VIX Rotation 相關策略的訊號會失真，但不影響其他功能）。
 
@@ -79,9 +79,9 @@ twn-rotation-backtester/
 ├── data/
 │   └── Stock_data_collection.xlsx # 資料來源（覆蓋這個檔案＝更新回測資料）
 ├── scripts/
-│   └── parse-xlsx.mjs             # 把 xlsx 轉成 src/data/twn_data.json 的 Node 腳本
+│   └── parse-xlsx.mjs             # 把 xlsx 轉成 src/data/market_data.json 的 Node 腳本
 ├── src/
-│   ├── data/twn_data.json         # App 實際 import 的資料（由 parse-xlsx.mjs 產生，不需手動編輯）
+│   ├── data/market_data.json         # App 實際 import 的資料（由 parse-xlsx.mjs 產生，不需手動編輯）
 │   ├── App.jsx                    # 主要元件（策略引擎＋所有 UI）
 │   └── main.jsx                   # Vite/React 進入點
 ├── index.html
@@ -105,4 +105,11 @@ twn-rotation-backtester/
 
 ## 與 Claude 對話版本的關係
 
-這個 repo 版本的 `src/App.jsx` 邏輯與在 Claude 對話中產生的 `twn_rotation_backtester_v2.jsx` 完全相同（同一份策略引擎程式碼），差別只在於：資料來源從「內嵌在檔案裡的固定陣列」改成「從 `src/data/twn_data.json` import」，讓資料更新可以透過上面的 GitHub 流程自動化，不用每次都重新產生一份新的內嵌資料檔。
+這個 repo 版本的 `src/App.jsx` 邏輯與在 Claude 對話中產生的 `twn_rotation_backtester_v2.jsx` 完全相同（同一份策略引擎程式碼），差別只在於：資料來源從「內嵌在檔案裡的固定陣列」改成「從 `src/data/market_data.json` import」，讓資料更新可以透過上面的 GitHub 流程自動化，不用每次都重新產生一份新的內嵌資料檔。
+
+## 多標的／美股測試分支（feature/multi-asset）
+
+- **標的自動偵測**：Excel 市場分頁中，欄位標題為 `<代號> price`（收盤）與 `<代號> open price`（開盤）的標的會自動出現在「多方／空方持有」與對照組選單；只有收盤價的標的（如 IX0001、2330）只能當「訊號標的」。之後新增 ETF 只要照這個命名在 Excel 加欄位，不需改程式。
+- **市場分頁**：台股＝`TWN historical data`（錨點標的 0050）、美股＝`VTS historical data`（錨點標的 SPY）。頁面上方可切換市場，各市場有各自的比較清單與回測期間。
+- **佔位資料提示**：標的上市前在 Excel 內是回填的固定價格，App 會偵測並在所選標的較晚上市時提示真實行情的起始日。
+- **測試分支不會上線**：push 到 `feature/**` 只會建置並產生 artifact `site-preview`（Actions 執行頁面最下方可下載，保留 14 天）。下載解壓後在該資料夾執行 `npx serve .` 即可在本機預覽；確認後再把分支合併進 `main` 才會正式部署。

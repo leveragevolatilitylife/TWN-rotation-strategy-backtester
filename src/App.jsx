@@ -17,27 +17,23 @@ import {
   ReferenceDot,
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
-import RAW_DATA from "./data/twn_data.json";
+import MARKET_DATA from "./data/market_data.json";
 
-const ASSET_KEYS = ["00631L", "00635U", "0050", "CASH"];
-const ASSET_LABELS = {
-  "00631L": "00631L・台灣50正2（槓桿多）",
-  "00635U": "00635U・VIX期貨ER（避險／防禦）",
-  "0050": "0050・台灣50（現貨）",
-  CASH: "現金（0% 報酬）",
+/* ---------- 市場設定 ----------
+   資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
+   標的清單由欄位自動偵測，之後在 Excel 新增 ETF 欄位即可出現在下拉選單，不需改程式。 */
+const MARKET_META = {
+  TW: { label: "台股", defaultBull: "00631L", defaultBear: "00635U", defaultSignal: "0050", vixLookback: 1000 },
+  US: { label: "美股", defaultBull: "SSO", defaultBear: "GLD", defaultSignal: "SPY", vixLookback: 250 },
 };
-const ASSET_SHORT = {
-  "00631L": "00631L",
-  "00635U": "00635U",
-  "0050": "0050",
-  CASH: "現金",
-};
+const assetShort = (k) => (k === "CASH" ? "現金" : k);
 
 // 手動新增策略使用的色盤：刻意避開下方 5 個預設策略各自固定的顏色，避免圖表撞色
 const RUN_COLORS = ["#f2d675", "#4fd1c5", "#ff9f6b", "#8ee6c5", "#6bc5ff", "#d488c9"];
-const BENCH_COLORS = { "00631L": "#5c6b78", "0050": "#8b98a5", "00635U": "#7a5c66" };
+const BENCH_COLORS = { "00631L": "#5c6b78", "0050": "#8b98a5", "00635U": "#7a5c66", SPY: "#8b98a5", SSO: "#5c6b78", GLD: "#7a5c66" };
+const BENCH_PALETTE = ["#6f7f8f", "#8a7a5c", "#5c7a70", "#7a6f8f", "#8f6f6f", "#6f8a8f"];
+const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
 const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
-const DEFAULT_RANGE_START = "2014-11-03"; // 回測期間預設起始日（00631L/00635U/VIX資料齊備的起點）
 
 const THEME = {
   bg: "#0b0f14",
@@ -54,22 +50,9 @@ const THEME = {
 };
 
 /* ---------- 資料前處理 ---------- */
-function buildDataset(rawRows) {
-  // rawRows: [date, close0050, open0050, close631L, open631L, close635U, open635U, rollYield, vix][]
-  const dates = [];
-  const c0050 = [], o0050 = [];
-  const c631L = [], o631L = [];
-  const c635U = [], o635U = [];
-  const rollYield = [];
-  const vix = [];
-  for (const row of rawRows) {
-    dates.push(row[0]);
-    c0050.push(row[1]); o0050.push(row[2]);
-    c631L.push(row[3]); o631L.push(row[4]);
-    c635U.push(row[5]); o635U.push(row[6]);
-    rollYield.push(row[7]);
-    vix.push(row[8]);
-  }
+function buildDataset(mk) {
+  // mk: { dates, anchor, rollYield, vix, assets: { 代號: { c: 收盤價[], o: 開盤價[] | null } } }
+  const { dates, rollYield, vix } = mk;
   const n = dates.length;
   const retOf = (arr) => {
     const r = new Array(n).fill(0);
@@ -78,19 +61,33 @@ function buildDataset(rawRows) {
     }
     return r;
   };
-  const prices = { "0050": c0050, "00631L": c631L, "00635U": c635U };
-  const opens = { "0050": o0050, "00631L": o631L, "00635U": o635U };
-  const returns = {
-    "0050": retOf(c0050),
-    "00631L": retOf(c631L),
-    "00635U": retOf(c635U),
-    CASH: new Array(n).fill(0),
-  };
-  return { dates, prices, opens, rollYield, vix, returns, n };
+  const prices = {};
+  const opens = {};
+  const returns = { CASH: new Array(n).fill(0) };
+  const assetInfo = {};
+  for (const key of Object.keys(mk.assets)) {
+    const { c, o } = mk.assets[key];
+    prices[key] = c;
+    if (o) opens[key] = o;
+    returns[key] = retOf(c);
+    // 偵測上市前的「佔位資料」：開頭連續不變的價格（Excel 內以第一筆有效價回填）。
+    // validFromIdx = 價格第一次變動的前一天；之前的報酬為 0%，不是真實行情。
+    const firstChange = c.findIndex((v, i) => i > 0 && (v !== c[0] || (o && o[i] !== o[0])));
+    const validFromIdx = firstChange === -1 ? n - 1 : Math.max(0, firstChange - 1);
+    assetInfo[key] = { tradeable: !!o, validFromIdx, validFromDate: dates[validFromIdx] };
+  }
+  const assetKeys = Object.keys(assetInfo).filter((k) => assetInfo[k].tradeable); // 可輪動持有
+  const signalKeys = Object.keys(assetInfo); // 可作為均線訊號標的
+  return { dates, prices, opens, rollYield, vix, returns, n, assetInfo, assetKeys, signalKeys, anchor: mk.anchor };
 }
 
-// 模組層級只計算一次，供元件初始 state（含開機自動載入的預設策略）共用
-const INITIAL_DATASET = buildDataset(RAW_DATA);
+// 模組層級只計算一次（各市場各一份），供元件初始 state（含開機自動載入的預設策略）共用
+const DATASETS = {};
+for (const k of Object.keys(MARKET_DATA)) DATASETS[k] = buildDataset(MARKET_DATA[k]);
+const MARKET_KEYS = Object.keys(DATASETS);
+const INITIAL_DATASET = DATASETS.TW;
+// 各市場「可選擇的最早回測起始日」＝錨點標的（台股 0050／美股 SPY）真正開始有行情的那天
+const marketFloorDate = (ds) => ds.dates[ds.assetInfo[ds.anchor].validFromIdx];
 
 /* ---------- 訊號計算 ---------- */
 function computeSMA(arr, period) {
@@ -457,7 +454,10 @@ function computeICSeries(dataset, finalSignal, bullAsset, bearAsset, icWindow) {
 function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   let sigA = null;
   let sigB = null;
-  if (cfg.maEnabled) sigA = computeMASignal(dataset.prices["0050"], dataset.opens["0050"], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close");
+  if (cfg.maEnabled) {
+    const sa = cfg.signalAsset || dataset.anchor;
+    sigA = computeMASignal(dataset.prices[sa], dataset.opens[sa] || dataset.prices[sa], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close");
+  }
   if (cfg.vixEnabled) sigB = computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
   const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
 
@@ -890,9 +890,10 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx) {
   const vixSignalCache = new Map();
 
   const getMASignal = (cfg) => {
-    const k = `${cfg.maPeriod}|${cfg.maBias}|${cfg.maPriceBasis || "close"}`;
+    const sa = cfg.signalAsset || dataset.anchor;
+    const k = `${sa}|${cfg.maPeriod}|${cfg.maBias}|${cfg.maPriceBasis || "close"}`;
     if (!maCache.has(k))
-      maCache.set(k, computeMASignal(dataset.prices["0050"], dataset.opens["0050"], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close"));
+      maCache.set(k, computeMASignal(dataset.prices[sa], dataset.opens[sa] || dataset.prices[sa], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close"));
     return maCache.get(k);
   };
   const getVixSignal = (cfg) => {
@@ -1002,24 +1003,29 @@ function computeDrawdownPct(equitySlice) {
    主元件
    ============================================================ */
 export default function App() {
-  // 資料為靜態內建資料（不再提供瀏覽器端上傳更新，資料更新請透過 GitHub repo 的
-  // data/Stock_data_collection.xlsx + GitHub Actions 自動重新部署）
-  const dataset = INITIAL_DATASET;
-  const dataMeta = { source: "內建資料（Stock_data_collection.xlsx）", rowCount: RAW_DATA.length };
+  // 資料為靜態內建資料（不提供瀏覽器端上傳，資料更新請透過 GitHub Actions 自動抓取 Excel 重新部署）
+  const [market, setMarket] = useState("TW");
+  const dataset = DATASETS[market];
+  const marketMeta = MARKET_META[market];
+  const dataMeta = { source: "內建資料（Stock_data_collection.xlsx）", rowCount: dataset.n };
 
-  const minDate = dataset.dates[0];
   const maxDate = dataset.dates[dataset.n - 1];
-  // 可選擇的最早回測起始日：資料集本身可能為了讓VIX滾動視窗有足夠暖身資料而往前延伸
-  // （00631L/00635U等ETF在真正上市前是佔位資料），因此「可選擇」的起始日仍鎖定在
-  // DEFAULT_RANGE_START，避免使用者手動選到佔位資料那段、得出失真的權益曲線。
-  const earliestSelectableDate = DEFAULT_RANGE_START >= minDate ? DEFAULT_RANGE_START : minDate;
-  const [rangeStart, setRangeStart] = useState(earliestSelectableDate);
-  const [rangeEnd, setRangeEnd] = useState(maxDate);
+  // 可選擇的最早回測起始日：資料集為了讓 VIX 滾動視窗有暖身資料可能往前延伸，
+  // 但錨點標的在真正上市／有行情之前是佔位資料，因此「可選擇」的起始日鎖定在錨點標的有行情的第一天。
+  const earliestSelectableDate = marketFloorDate(dataset);
+  const [ranges, setRanges] = useState(() =>
+    Object.fromEntries(MARKET_KEYS.map((m) => [m, { start: marketFloorDate(DATASETS[m]), end: DATASETS[m].dates[DATASETS[m].n - 1] }]))
+  );
+  const rangeStart = ranges[market].start;
+  const rangeEnd = ranges[market].end;
+  const setRangeStart = (v) => setRanges((p) => ({ ...p, [market]: { ...p[market], start: v } }));
+  const setRangeEnd = (v) => setRanges((p) => ({ ...p, [market]: { ...p[market], end: v } }));
 
   // 草稿設定（尚未加入比較）
   const [draft, setDraft] = useState({
     name: "",
     maEnabled: true,
+    signalAsset: MARKET_META.TW.defaultSignal,
     maPeriod: 60,
     maBias: 20,
     maPriceBasis: "close",
@@ -1030,19 +1036,44 @@ export default function App() {
     vixLow: 1,
     vixExtremeLow: 0.5,
     combineMode: "AND",
-    bullAsset: "00631L",
-    bearAsset: "00635U",
+    bullAsset: MARKET_META.TW.defaultBull,
+    bearAsset: MARKET_META.TW.defaultBear,
     riskFreeRate: 1.5,
     commissionRate: 0.1425,
     taxRate: 0.1,
     icWindow: 60,
   });
 
-  const [runs, setRuns] = useState(() =>
-    PRESETS.map((p) => buildRunFromConfig(INITIAL_DATASET, p.config, p.name, p.color))
+  // 各市場各自一份比較清單；其餘程式碼仍以 runs / setRuns 操作「目前市場」的清單
+  const [runsByMarket, setRunsByMarket] = useState(() => ({
+    TW: PRESETS.map((p) => buildRunFromConfig(INITIAL_DATASET, p.config, p.name, p.color)),
+    ...Object.fromEntries(MARKET_KEYS.filter((m) => m !== "TW").map((m) => [m, []])),
+  }));
+  const runs = runsByMarket[market] || [];
+  const setRuns = useCallback(
+    (u) => setRunsByMarket((prev) => ({ ...prev, [market]: typeof u === "function" ? u(prev[market] || []) : u })),
+    [market]
   );
+  const switchMarket = (m) => {
+    if (m === market) return;
+    const ds = DATASETS[m];
+    const meta = MARKET_META[m];
+    const pick = (want, list, fallbackIdx) => (list.includes(want) ? want : list[Math.min(fallbackIdx, list.length - 1)]);
+    setMarket(m);
+    setConfigError(null);
+    setPboResult(null);
+    setPboError(null);
+    setDraft((d) => ({
+      ...d,
+      bullAsset: pick(meta.defaultBull, ds.assetKeys, 0),
+      bearAsset: pick(meta.defaultBear, ds.assetKeys, 1),
+      signalAsset: pick(meta.defaultSignal, ds.signalKeys, 0),
+      vixLookback: meta.vixLookback,
+    }));
+  };
   const [runSeq, setRunSeq] = useState(1);
-  const [benchOn, setBenchOn] = useState({ "00631L": true, "0050": true, "00635U": false });
+  const [benchOn, setBenchOn] = useState({}); // 對照組勾選狀態：未設定者預設只勾「多方預設標的」與「錨點標的」
+  const isBenchOn = (k) => benchOn[k] ?? (k === marketMeta.defaultBull || k === dataset.anchor);
   const [logScale, setLogScale] = useState(false);
   const [hoverRunKey, setHoverRunKey] = useState(null); // 滑鼠停在哪條策略曲線上（用於浮現換倉標記）
   const [configError, setConfigError] = useState(null);
@@ -1082,13 +1113,17 @@ export default function App() {
       setConfigError(`最多同時比較 ${MAX_RUNS} 組策略，請先刪除一組再新增。`);
       return;
     }
+    if (draft.maEnabled && draft.maPriceBasis === "open" && !dataset.opens[draft.signalAsset]) {
+      setConfigError(`訊號標的 ${draft.signalAsset} 沒有開盤價欄位，無法使用「開盤價」均線基準，請改用收盤價或換一個標的。`);
+      return;
+    }
     const color = RUN_COLORS[runSeq % RUN_COLORS.length];
     const name = draft.name.trim() || `策略 ${runSeq}`;
     const run = buildRunFromConfig(dataset, draft, name, color, rangeIdx.endIdx);
     setRuns((prev) => [...prev, run]);
     setRunSeq((s) => s + 1);
     setDraft((d) => ({ ...d, name: "" }));
-  }, [draft, dataset, runs.length, runSeq, rangeIdx]);
+  }, [draft, dataset, runs.length, runSeq, rangeIdx, setRuns]);
 
   const removeRun = (id) => setRuns((prev) => prev.filter((r) => r.id !== id));
   const clearAllRuns = () => { setRuns([]); setConfigError(null); };
@@ -1096,6 +1131,7 @@ export default function App() {
   const addPresetRun = useCallback(
     (preset) => {
       setConfigError(null);
+      if (market !== "TW") return;
       if (runs.length >= MAX_RUNS) {
         setConfigError(`最多同時比較 ${MAX_RUNS} 組策略，請先刪除一組再新增。`);
         return;
@@ -1103,11 +1139,12 @@ export default function App() {
       const run = buildRunFromConfig(dataset, preset.config, preset.name, preset.color, rangeIdx.endIdx);
       setRuns((prev) => [...prev, run]);
     },
-    [dataset, runs.length, rangeIdx]
+    [dataset, runs.length, rangeIdx, market, setRuns]
   );
 
   const addAllPresets = useCallback(() => {
     setConfigError(null);
+    if (market !== "TW") return;
     const room = MAX_RUNS - runs.length;
     if (room <= 0) {
       setConfigError(`最多同時比較 ${MAX_RUNS} 組策略，請先刪除幾組再載入。`);
@@ -1115,7 +1152,7 @@ export default function App() {
     }
     const toAdd = PRESETS.slice(0, room).map((p) => buildRunFromConfig(dataset, p.config, p.name, p.color, rangeIdx.endIdx));
     setRuns((prev) => [...prev, ...toAdd]);
-  }, [dataset, runs.length, rangeIdx]);
+  }, [dataset, runs.length, rangeIdx, market, setRuns]);
 
   const addPboParam = useCallback(() => {
     const avail = getAvailableParams(draft);
@@ -1190,7 +1227,7 @@ export default function App() {
     const icRollSeries = [];
     const icExpSeries = [];
     const table = [];
-    const markers = {}; // runId -> [{date, value, kind}]，kind: "toDefense"(轉入00635U) | "toLong"(轉入00631L)
+    const markers = {}; // runId -> [{date, value, kind}]，kind: "toDefense"(轉入空方標的) | "toLong"(轉入多方標的)
     const keepDates = new Set();
     const tradeTable = [];
     const distRunsData = [];
@@ -1213,9 +1250,11 @@ export default function App() {
       for (let i = startIdx; i <= endIdx; i++) {
         const a = run.appliedAsset[i];
         if (!a) continue;
-        if (prevA && a !== prevA && (a === "00635U" || a === "00631L")) {
+        const bullA = run.config.bullAsset;
+        const bearA = run.config.bearAsset;
+        if (prevA && a !== prevA && bullA !== bearA && (a === bearA || a === bullA)) {
           const d = slicedDates[i - startIdx];
-          runMarkers.push({ date: d, value: sliced[i - startIdx], kind: a === "00635U" ? "toDefense" : "toLong" });
+          runMarkers.push({ date: d, value: sliced[i - startIdx], kind: a === bearA ? "toDefense" : "toLong" });
           keepDates.add(d);
         }
         prevA = a;
@@ -1269,30 +1308,30 @@ export default function App() {
       icTable.push({ id: run.id, name: run.name, color: run.color, icMean, icStd, ir, icExpFinal });
     }
 
-    for (const assetKey of Object.keys(benchOn)) {
-      if (!benchOn[assetKey]) continue;
+    for (const assetKey of dataset.assetKeys) {
+      if (!isBenchOn(assetKey)) continue;
       const bh = buyHoldCurve(dataset, assetKey);
       const sliced = sliceAndNormalize(bh, startIdx, endIdx);
       const ddData = computeDrawdownPct(sliced);
       const stats = computeStats(sliced, 0, 1.5);
       series.push({
         key: `bh_${assetKey}`,
-        name: `Buy & Hold ${ASSET_SHORT[assetKey]}`,
-        color: BENCH_COLORS[assetKey],
+        name: `Buy & Hold ${assetShort(assetKey)}`,
+        color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         dash: true,
         data: sliced,
       });
       ddSeries.push({
         key: `bh_${assetKey}`,
-        name: `Buy & Hold ${ASSET_SHORT[assetKey]}`,
-        color: BENCH_COLORS[assetKey],
+        name: `Buy & Hold ${assetShort(assetKey)}`,
+        color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         dash: true,
         data: ddData,
       });
       table.push({
         id: `bh_${assetKey}`,
-        name: `Buy & Hold ${ASSET_SHORT[assetKey]}`,
-        color: BENCH_COLORS[assetKey],
+        name: `Buy & Hold ${assetShort(assetKey)}`,
+        color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         isBench: true,
         lastAsset: assetKey,
         ...stats,
@@ -1325,7 +1364,7 @@ export default function App() {
       tradeDistribution: buildReturnDistribution(distRunsData),
       icTableRows: icTable,
     };
-  }, [runs, benchOn, dataset, rangeIdx]);
+  }, [runs, benchOn, dataset, rangeIdx, market]);
 
 
   const S = THEME;
@@ -1354,11 +1393,36 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
-              台股輪動策略回測平台 <span style={{ fontSize: 12, fontWeight: 500, color: S.textFaint }}>v2</span>
+              {marketMeta.label}輪動策略回測平台 <span style={{ fontSize: 12, fontWeight: 500, color: S.textFaint }}>v2</span>
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
-              VIX Roll Yield ／ 0050 均線乖離率 輪動邏輯・可自由調參數並排比較・已預載 5 組每日追蹤儀表板預設策略
+              VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
+              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略" : ""}
             </p>
+            {MARKET_KEYS.length > 1 && (
+              <div role="tablist" aria-label="市場" style={{ display: "inline-flex", gap: 0, marginTop: 10, border: `1px solid ${S.border}`, borderRadius: 5, overflow: "hidden" }}>
+                {MARKET_KEYS.map((m) => (
+                  <button
+                    key={m}
+                    role="tab"
+                    aria-selected={m === market}
+                    onClick={() => switchMarket(m)}
+                    style={{
+                      background: m === market ? S.panelAlt : "transparent",
+                      color: m === market ? S.text : S.textMuted,
+                      border: "none",
+                      borderRight: m !== MARKET_KEYS[MARKET_KEYS.length - 1] ? `1px solid ${S.border}` : "none",
+                      padding: "6px 16px",
+                      fontSize: 12.5,
+                      fontWeight: m === market ? 600 : 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {MARKET_META[m].label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <div style={{ textAlign: "right" }}>
             <div className="mono" style={{ fontSize: 12, color: S.textMuted }}>
@@ -1375,6 +1439,8 @@ export default function App() {
         <div style={{ display: "flex", flexWrap: "wrap" }}>
           {/* 側邊參數面板 */}
           <div style={{ width: 340, maxWidth: "100%", borderRight: `1px solid ${S.border}`, padding: 20 }}>
+            {market === "TW" ? (
+              <>
             <SectionLabel text="預設策略（每日追蹤儀表板）" />
             <HintText text="對應「台股波動率輪換策略儀表板」每日追蹤的 5 種持倉策略，開啟頁面時已自動載入下方比較清單；可個別刪除，或用下方按鈕重新套用單一策略／全部套用。" />
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8, marginBottom: 8 }}>
@@ -1435,6 +1501,10 @@ export default function App() {
                 清空比較清單
               </button>
             </div>
+              </>
+            ) : (
+              <HintText text="美股沒有預設策略：請在下方自選訊號標的與多方／空方標的後按「加入比較」。VIX 訊號需要「滾動視窗天數」的暖身資料，美股資料自 2018 年起，預設已把視窗縮短為 250 個交易日。" />
+            )}
 
             <SectionLabel text="回測期間" />
             <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
@@ -1448,7 +1518,7 @@ export default function App() {
               </div>
             </div>
 
-            <SectionLabel text="① 均線輪動（0050 SMA + 乖離率）" />
+            <SectionLabel text={`① 均線輪動（${draft.signalAsset} SMA + 乖離率）`} />
             <ToggleRow
               checked={draft.maEnabled}
               onChange={(v) => setDraft((d) => ({ ...d, maEnabled: v }))}
@@ -1456,6 +1526,17 @@ export default function App() {
             />
             {draft.maEnabled && (
               <div style={{ marginBottom: 18, paddingLeft: 2 }}>
+                <div style={{ marginBottom: 10 }}>
+                  <FieldLabel text="訊號標的（以此標的的均線與乖離率判斷多空）" />
+                  <select value={draft.signalAsset} onChange={(e) => setDraft((d) => ({ ...d, signalAsset: e.target.value }))} style={selectStyle(S)}>
+                    {dataset.signalKeys.map((k) => (
+                      <option key={k} value={k}>
+                        {k}
+                        {dataset.opens[k] ? "" : "（僅收盤價）"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <TwoCol>
                   <div>
                     <FieldLabel text="均線天數" />
@@ -1559,9 +1640,9 @@ export default function App() {
               <div>
                 <FieldLabel text="多方持有" />
                 <select value={draft.bullAsset} onChange={(e) => setDraft((d) => ({ ...d, bullAsset: e.target.value }))} style={selectStyle(S)}>
-                  {ASSET_KEYS.map((k) => (
+                  {[...dataset.assetKeys, "CASH"].map((k) => (
                     <option key={k} value={k}>
-                      {ASSET_SHORT[k]}
+                      {assetShort(k)}
                     </option>
                   ))}
                 </select>
@@ -1569,14 +1650,25 @@ export default function App() {
               <div>
                 <FieldLabel text="空方持有" />
                 <select value={draft.bearAsset} onChange={(e) => setDraft((d) => ({ ...d, bearAsset: e.target.value }))} style={selectStyle(S)}>
-                  {ASSET_KEYS.map((k) => (
+                  {[...dataset.assetKeys, "CASH"].map((k) => (
                     <option key={k} value={k}>
-                      {ASSET_SHORT[k]}
+                      {assetShort(k)}
                     </option>
                   ))}
                 </select>
               </div>
             </TwoCol>
+            {(() => {
+              const used = [draft.bullAsset, draft.bearAsset, ...(draft.maEnabled ? [draft.signalAsset] : [])].filter((k) => dataset.assetInfo[k]);
+              const late = used
+                .map((k) => ({ k, d: dataset.assetInfo[k].validFromDate }))
+                .filter((x) => x.d > rangeStart)
+                .sort((a, b) => (a.d < b.d ? 1 : -1));
+              if (late.length === 0) return null;
+              return (
+                <HintText text={`⚠ ${late.map((x) => `${x.k} 自 ${x.d}`).join("、")} 才有真實行情；更早的價格是佔位資料（報酬 0%）。建議把回測起始日設在 ${late[0].d} 之後，否則早期績效會失真。`} />
+              );
+            })()}
             <SectionLabel text="交易成本（輪動時以開盤價成交）" />
             <TwoCol>
               <div>
@@ -1667,10 +1759,10 @@ export default function App() {
 
             <div style={{ marginTop: 18 }}>
               <SectionLabel text="對照組（Buy & Hold）" />
-              {Object.keys(benchOn).map((k) => (
+              {dataset.assetKeys.map((k) => (
                 <label key={k} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, marginBottom: 6, cursor: "pointer", color: S.textMuted }}>
-                  <input className="chk" type="checkbox" checked={benchOn[k]} onChange={(e) => setBenchOn((b) => ({ ...b, [k]: e.target.checked }))} />
-                  {ASSET_SHORT[k]}
+                  <input className="chk" type="checkbox" checked={isBenchOn(k)} onChange={(e) => setBenchOn((b) => ({ ...b, [k]: e.target.checked }))} />
+                  {assetShort(k)}
                 </label>
               ))}
             </div>
@@ -1894,7 +1986,7 @@ export default function App() {
                 </ResponsiveContainer>
               )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由 00635U 輪動至 00631L</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由 00631L 輪動至 00635U</span>（標記於換倉當日的權益位置；Buy &amp; Hold 對照組無換倉標記）。
+                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的權益位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
@@ -1980,7 +2072,7 @@ export default function App() {
                           {row.name}
                         </span>
                       </Td>
-                      <Td align="left">{row.isBench ? ASSET_SHORT[row.lastAsset] : row.lastAsset ? ASSET_SHORT[row.lastAsset] : "—"}</Td>
+                      <Td align="left">{row.isBench ? assetShort(row.lastAsset) : row.lastAsset ? assetShort(row.lastAsset) : "—"}</Td>
                       <Td colorize value={row.totalReturn} S={S}>
                         {pct(row.totalReturn)}
                       </Td>
@@ -2380,7 +2472,7 @@ export default function App() {
               說明／假設：訊號以「當日收盤」計算，隔日套用（避免未來函數）・輪動當天以「開盤價」成交：舊標的計前收→開盤的隔夜報酬，新標的計開盤→收盤的盤中報酬，並依左側設定扣除手續費（買賣各一次）與證交稅（僅賣出）；未輪動的日子維持一般收盤對收盤報酬、無交易成本・
               交易成本已直接反映在權益曲線與下方所有績效指標中，未另計滑價・均線可選「收盤價」（標準SMA）或「當日開盤價」（MA Rotation II：以當日開盤+前(N-1)日收盤計算，可於當日開盤時即得訊號）兩種計算基準，乖離率 = (比較價 − 均線)/均線・
               5 組預設策略的參數（均線天數/基準、VIX滾動視窗與分位門檻、Hybrid合併模式）皆由原始試算表公式逐一比對確認；手續費率預設為標準（未折扣）費率0.1425%，原始試算表實際採用之折扣費率為0.1425%×0.6=0.0855%且每次輪動僅合併扣除一次，本工具則對賣出與買進各計一次（較符合實際交易機制），如需貼近原始試算表可將左側手續費率調整為0.0855%參考，惟仍會因計費次數不同而略有落差，非計算錯誤・
-              內建資料的VX30:VIX Roll Yield回溯至2007年（讓VIX滾動視窗從回測期間一開始就有足夠暖身資料，不需等待數年才產生訊號），但00631L/00635U/0050等價格在2014/11/3之前為原始檔案回填的佔位資料（ETF尚未上市），因此「回測期間」的起始日不論資料集本身多早，UI上都鎖定最早只能選到2014/11/3，避免選到佔位資料段落、得出失真的權益曲線與績效指標。
+              台股資料的VX30:VIX Roll Yield回溯至2007年（讓VIX滾動視窗從回測期間一開始就有足夠暖身資料，不需等待數年才產生訊號），但各ETF在上市之前於原始檔案中是回填的佔位資料，因此「回測期間」的起始日鎖定在錨點標的（台股0050／美股SPY）真正有行情的第一天；若所選標的更晚上市，側欄會提示真實行情的起始日。美股資料自2018年起，VIX訊號需先累積滾動視窗天數才會產生。
               VIX 分位門檻採「滾動視窗」逐日重新計算，避免使用未來資料・CAGR 以 252 個交易日/年換算，Sharpe／Sortino 以日報酬年化並扣除設定之無風險利率，Sortino 僅計入低於無風險利率之下方波動・
               Ulcer Index 為回撤深度的均方根（%），UPI = (CAGR% − 無風險利率%) / Ulcer Index・回撤曲線與 Ulcer Index／最大回撤使用同一套「相對歷史高點」定義・「交易分析」表以「每次輪動買進到下次輪動賣出」為一筆交易，勝率／賠率／期望值皆以此為單位計算，僅計入完整落於所選日期範圍內、且已平倉的交易；期末仍持有中的部位不計入・
               IC 以「策略當日多空方向（多方=+1／空方=-1）」與「隔日多空資產報酬價差」的皮爾森相關係數衡量，滾動IC為固定視窗、累計IC為自資料起點展開之視窗，IR = 滾動IC序列之均值/標準差；三者皆為訊號品質的輔助診斷，非直接等於策略報酬・
