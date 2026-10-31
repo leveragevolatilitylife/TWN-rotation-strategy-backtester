@@ -877,7 +877,206 @@ function computeDeflatedSharpe(returnsMatrix) {
   return { dsr, srHat, expectedMaxSR, sigmaSR, bestIdx, skew, kurt, T };
 }
 
-function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx) {
+/* ---------- 前向分析 (Walk Forward Analysis) ----------
+   沿用 PBO 的同一組候選策略網格：每一折先在「樣本內(IS)視窗」挑出 Sharpe 最高的參數組合，
+   再看它在緊接著的「樣本外(OS)視窗」表現，之後視窗整體往前推進一個 OS 長度，重複直到資料用完。
+   把每折選出者的 OS 報酬串接起來，就是一條「從未用未來資料挑參數」的樣本外績效。
+   注意：各候選策略的日報酬來自完整期間的單次回測再切片（與 CSCV 做法一致），
+   因此持倉狀態會跨視窗延續，視窗邊界不另計換倉成本。 */
+const TRADING_DAYS_PER_YEAR = 252;
+const TRADING_DAYS_PER_MONTH = 21;
+
+function compoundReturn(rets) {
+  let eq = 1;
+  for (const r of rets) eq *= 1 + r;
+  return eq - 1;
+}
+function maxDrawdownOfReturns(rets) {
+  let eq = 1, peak = 1, mdd = 0;
+  for (const r of rets) {
+    eq *= 1 + r;
+    if (eq > peak) peak = eq;
+    const dd = eq / peak - 1;
+    if (dd < mdd) mdd = dd;
+  }
+  return mdd;
+}
+
+function runWalkForward(returnsMatrix, variants, dateOf, cfg) {
+  const N = returnsMatrix.length;
+  const T = returnsMatrix[0].length;
+  const isLen = Math.round(cfg.isYears * TRADING_DAYS_PER_YEAR);
+  const osLen = Math.round(cfg.osMonths * TRADING_DAYS_PER_MONTH);
+  const anchored = cfg.mode === "anchored";
+  const annF = Math.sqrt(TRADING_DAYS_PER_YEAR);
+
+  const folds = [];
+  for (let osStart = isLen; osStart + osLen <= T; osStart += osLen) {
+    const isStart = anchored ? 0 : osStart - isLen;
+    const osEnd = osStart + osLen;
+    let bestIdx = 0, bestIS = -Infinity;
+    const osSharpes = new Array(N);
+    for (let v = 0; v < N; v++) {
+      const rets = returnsMatrix[v];
+      const isS = sharpeLike(rets.slice(isStart, osStart));
+      osSharpes[v] = sharpeLike(rets.slice(osStart, osEnd));
+      if (isS > bestIS) { bestIS = isS; bestIdx = v; }
+    }
+    const selOS = osSharpes[bestIdx];
+    let beaten = 0;
+    for (let v = 0; v < N; v++) if (osSharpes[v] < selOS) beaten++;
+    const sortedOS = [...osSharpes].sort((a, b) => a - b);
+    const medianOS = sortedOS[Math.floor(N / 2)];
+    const osRets = returnsMatrix[bestIdx].slice(osStart, osEnd);
+    folds.push({
+      isFrom: dateOf(isStart), isTo: dateOf(osStart - 1),
+      osFrom: dateOf(osStart), osTo: dateOf(osEnd - 1),
+      params: variants[bestIdx],
+      paramKey: JSON.stringify(variants[bestIdx]),
+      isSharpe: bestIS * annF,
+      osSharpe: selOS * annF,
+      osReturn: compoundReturn(osRets),
+      rankPct: N > 1 ? beaten / (N - 1) : 0.5,
+      medianOsSharpe: medianOS * annF,
+      osRets,
+    });
+  }
+  if (folds.length < 2) {
+    return { error: `前向分析所需資料不足：目前設定（樣本內 ${cfg.isYears} 年、樣本外 ${cfg.osMonths} 個月）在所選期間只能切出 ${folds.length} 折，至少需要 2 折。請縮短樣本內／樣本外長度，或延長回測期間。` };
+  }
+
+  const stitched = folds.flatMap((f) => f.osRets);
+  const nDays = stitched.length;
+  const oosSharpe = sharpeLike(stitched) * annF;
+  const oosTotal = compoundReturn(stitched);
+  const oosCagr = nDays > 0 ? Math.pow(1 + oosTotal, TRADING_DAYS_PER_YEAR / nDays) - 1 : null;
+  const oosMdd = maxDrawdownOfReturns(stitched);
+  const meanIS = folds.reduce((a, f) => a + f.isSharpe, 0) / folds.length;
+  const wfe = meanIS > 0 ? oosSharpe / meanIS : null;
+  const posFolds = folds.filter((f) => f.osReturn > 0).length / folds.length;
+  const beatMedian = folds.filter((f) => f.rankPct > 0.5).length / folds.length;
+  const meanRankPct = folds.reduce((a, f) => a + f.rankPct, 0) / folds.length;
+  const medianCandSharpe = folds.reduce((a, f) => a + f.medianOsSharpe, 0) / folds.length;
+  const counts = new Map();
+  for (const f of folds) counts.set(f.paramKey, (counts.get(f.paramKey) || 0) + 1);
+  const topShare = Math.max(...counts.values()) / folds.length;
+  return {
+    folds: folds.map(({ osRets, ...rest }) => rest),
+    foldCount: folds.length, isYears: cfg.isYears, osMonths: cfg.osMonths, mode: cfg.mode,
+    oosSharpe, oosCagr, oosTotal, oosMdd, meanIS, wfe, posFolds, beatMedian, meanRankPct, medianCandSharpe,
+    distinctParams: counts.size, topShare, oosDays: nDays,
+  };
+}
+
+/* ---------- 過擬合綜合評價（規則式） ----------
+   把 PBO、DSR、前向分析三項各給 0~2 分（好=2、尚可=1、差=0），總分比例決定整體結論；
+   候選策略平均相關係數不計分，只用來調整「PBO／DSR 這兩個數字有多大參考價值」的說明。 */
+function evaluateOverfitting(r) {
+  const items = [];
+  const notes = [];
+
+  const pbo = r.pbo;
+  items.push({
+    key: "PBO", valueText: pct(pbo, 1),
+    score: pbo < 0.2 ? 2 : pbo < 0.5 ? 1 : 0,
+    verdict: pbo < 0.2 ? "良好" : pbo < 0.5 ? "尚可" : "偏高",
+    detail: pbo < 0.2
+      ? "樣本內最佳的參數組合，在樣本外多半仍排在中位數以上。"
+      : pbo < 0.5
+      ? "樣本內最佳組合在樣本外仍有一定機率落後中位數，穩健度普通。"
+      : "樣本內最佳組合在樣本外有一半以上機率落後中位數，挑參數的行為很可能在擬合雜訊。",
+    rule: "<20% 良好・20~50% 尚可・≥50% 偏高",
+  });
+
+  const dsr = r.dsr.dsr;
+  if (dsr == null) {
+    items.push({ key: "DSR", valueText: "—", score: null, verdict: "無法計算", detail: "樣本長度或報酬分布不足以計算 DSR。", rule: "≥95% 良好・50~95% 尚可・<50% 偏低" });
+  } else {
+    items.push({
+      key: "DSR", valueText: pct(dsr, 1),
+      score: dsr >= 0.95 ? 2 : dsr >= 0.5 ? 1 : 0,
+      verdict: dsr >= 0.95 ? "良好" : dsr >= 0.5 ? "尚可" : "偏低",
+      detail: dsr >= 0.95
+        ? "扣除搜索 N 組參數的多重比較效應後，最佳策略的 Sharpe 仍高度可能優於純運氣。"
+        : dsr >= 0.5
+        ? "證據尚不足以排除「最佳策略只是搜索出來的運氣」。"
+        : "最佳策略的 Sharpe 很可能只是搜索多組參數挑出來的運氣。",
+      rule: "≥95% 良好・50~95% 尚可・<50% 偏低",
+    });
+  }
+
+  const w = r.wfa;
+  if (!w || w.error) {
+    items.push({ key: "前向分析 (WFA)", valueText: "—", score: null, verdict: "無法計算", detail: w?.error || "未執行前向分析。", rule: "以 4 項檢查通過數計分" });
+  } else {
+    const checks = [
+      { ok: w.oosSharpe > 0, text: `串接樣本外 Sharpe ${num(w.oosSharpe, 2)} ${w.oosSharpe > 0 ? ">" : "≤"} 0` },
+      { ok: w.wfe != null && w.wfe >= 0.5, text: `WFE ${w.wfe == null ? "—（樣本內 Sharpe ≤ 0）" : num(w.wfe, 2)} ${w.wfe != null && w.wfe >= 0.5 ? "≥" : "<"} 0.5` },
+      { ok: w.posFolds >= 0.6, text: `樣本外正報酬折數 ${pct(w.posFolds, 0)} ${w.posFolds >= 0.6 ? "≥" : "<"} 60%` },
+      { ok: w.beatMedian >= 0.5, text: `選出者勝過候選中位數的折數 ${pct(w.beatMedian, 0)} ${w.beatMedian >= 0.5 ? "≥" : "<"} 50%` },
+    ];
+    const passed = checks.filter((c) => c.ok).length;
+    items.push({
+      key: "前向分析 (WFA)", valueText: `${passed}/4 項通過`,
+      score: passed >= 3 ? 2 : passed === 2 ? 1 : 0,
+      verdict: passed >= 3 ? "良好" : passed === 2 ? "尚可" : "偏差",
+      detail: checks.map((c) => `${c.ok ? "✓" : "✗"} ${c.text}`).join("；"),
+      rule: "4 項檢查通過 ≥3 良好・2 尚可・≤1 偏差",
+    });
+  }
+
+  const scored = items.filter((i) => i.score != null);
+  const total = scored.reduce((a, i) => a + i.score, 0);
+  const maxTotal = scored.length * 2;
+  const ratio = maxTotal > 0 ? total / maxTotal : 0;
+  let level, tone;
+  const unstable = r.wfa && !r.wfa.error && r.wfa.topShare < 0.4;
+  if (ratio >= 0.8 && unstable) { level = "整體偏穩健，但參數不穩定，風險中等"; tone = "gold"; }
+  else if (ratio >= 0.8) { level = "過擬合風險較低"; tone = "teal"; }
+  else if (ratio >= 0.5) { level = "風險中等，建議補充驗證"; tone = "gold"; }
+  else { level = "過擬合風險偏高"; tone = "rose"; }
+
+  // 相關係數：調整其他指標的可信度說明
+  const corr = r.avgPairwiseCorr;
+  if (corr != null && corr >= 0.85) {
+    notes.push(`候選策略平均相關係數 ${num(corr, 2)} 偏高：網格裡的策略大多是彼此相似的變體，實際獨立嘗試的次數比 N=${r.N} 少很多。這會讓 PBO 傾向被低估或失真、DSR 的多重比較修正被高估，上面的好結果請打折看待。`);
+  } else if (corr != null && corr < 0.5) {
+    notes.push(`候選策略平均相關係數 ${num(corr, 2)} 不高：網格內的策略差異夠大，PBO 與 DSR 的資訊量較足，結論相對可信。`);
+  } else if (corr != null) {
+    notes.push(`候選策略平均相關係數 ${num(corr, 2)}，屬中等相似度，PBO 與 DSR 可正常參考。`);
+  }
+
+  // 指標之間是否互相矛盾
+  const pboItem = items[0], dsrItem = items[1], wfaItem = items[2];
+  if (pboItem.score === 2 && dsrItem.score === 0) {
+    notes.push("PBO 很低但 DSR 偏低：PBO 只看「選出的最佳者相對其他候選的排名」，不管整體 Sharpe 本身是否顯著；若所有候選都差不多好（或差），PBO 會低，但最佳策略的 Sharpe 仍可能只是運氣。請以 DSR 的警訊為主。");
+  }
+  if (pboItem.score === 0 && dsrItem.score === 2) {
+    notes.push("PBO 偏高但 DSR 良好：代表整個網格普遍有優勢，但「挑哪一組」不穩定。策略大方向可能有效，可是不該迷信單一最佳參數，建議改用參數區間或多組參數平均。");
+  }
+  if (wfaItem.score != null && wfaItem.score === 0 && pboItem.score === 2) {
+    notes.push("PBO 良好但前向分析偏差：CSCV 會打亂時間順序做切分，前向分析則嚴格遵守時間先後，後者更接近實際操作情境，通常也更嚴格。請特別重視前向分析的結果。");
+  }
+  const w2 = r.wfa;
+  if (w2 && !w2.error) {
+    if (w2.topShare < 0.4) notes.push(`前向分析每折選出的參數相當分散（${w2.foldCount} 折中出現 ${w2.distinctParams} 種組合，最常見者只佔 ${pct(w2.topShare, 0)}）：最佳參數會隨時期大幅跳動，是參數不穩定、容易過擬合的跡象。`);
+    else if (w2.topShare >= 0.6) notes.push(`前向分析每折選出的參數相當一致（最常見的組合佔 ${pct(w2.topShare, 0)}），參數穩定性佳。`);
+    if (w2.wfe != null && w2.wfe > 1.2) notes.push(`WFE ${num(w2.wfe, 2)} 明顯大於 1：樣本外比樣本內還好，多半是樣本外剛好遇到有利行情，而非策略特別穩健，不宜過度解讀。`);
+  }
+  if (r.T < 750) notes.push(`樣本長度僅 ${r.T} 個交易日（約 ${(r.T / 252).toFixed(1)} 年），各項統計量的信賴區間都很寬，結論參考性有限。`);
+
+  const advice = [];
+  if (pboItem.score === 0) advice.push("減少可調參數或縮小參數範圍，並改採「參數穩健區間」而非單點最佳值。");
+  if (dsrItem.score === 0) advice.push("降低搜索規模（少一點網格），或用不重疊的新資料（如之後累積的實盤／紙上交易）做真正的樣本外驗證。");
+  if (wfaItem.score === 0) advice.push("前向分析偏差時，不建議直接上線；可試著拉長樣本內視窗，或固定參數後觀察新資料表現。");
+  if (unstable) advice.push("每折選到的參數差異大時，不要押單一最佳參數；可改用多組相鄰參數分散，或只採用多個時期都表現不差的參數區間。");
+  if (items.every((i) => i.score === 2)) advice.push("三項檢驗皆過關，仍建議先用小部位實盤驗證，並持續追蹤新資料上的表現。");
+  else if (advice.length === 0) advice.push("沒有明顯警訊，但有指標只達「尚可」，建議持續追蹤新資料上的表現，再決定是否加碼。");
+
+  return { items, total, maxTotal, ratio, level, tone, notes, advice };
+}
+
+function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
   const { startIdx, endIdx } = rangeIdx;
   const variants = cartesianProduct(paramDefs); // 每個元素為 {參數key: 值, ...} 的組合
   const N = variants.length;
@@ -969,7 +1168,9 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx) {
     if (logit <= 0) overfitCount++;
   }
   const pbo = overfitCount / isCombos.length;
-  return { N, combos: isCombos.length, S, T, pbo, logits, avgPairwiseCorr, dsr: dsrResult, bestParams };
+  const firstIdx = Math.max(startIdx, 1);
+  const wfa = wfaCfg ? runWalkForward(returnsMatrix, variants, (t) => dataset.dates[firstIdx + t], wfaCfg) : null;
+  return { N, combos: isCombos.length, S, T, pbo, logits, avgPairwiseCorr, dsr: dsrResult, bestParams, wfa };
 }
 
 /* ---------- 小工具 ---------- */
@@ -1084,6 +1285,9 @@ export default function App() {
   ]);
   const [pboBlocks, setPboBlocks] = useState(8);
   const [pboMaxCombos, setPboMaxCombos] = useState(200);
+  const [wfaIsYears, setWfaIsYears] = useState(3);
+  const [wfaOsMonths, setWfaOsMonths] = useState(6);
+  const [wfaMode, setWfaMode] = useState("rolling");
   const [pboResult, setPboResult] = useState(null);
   const [pboError, setPboError] = useState(null);
   const [pboRunning, setPboRunning] = useState(false);
@@ -1200,7 +1404,7 @@ export default function App() {
     setPboRunning(true);
     setTimeout(() => {
       try {
-        const result = runPBOAnalysis(dataset, draft, paramDefs, pboBlocks, rangeIdx);
+        const result = runPBOAnalysis(dataset, draft, paramDefs, pboBlocks, rangeIdx, { isYears: wfaIsYears, osMonths: wfaOsMonths, mode: wfaMode });
         setPboResult({
           ...result,
           paramLabels: paramDefs.map((p) => p.label),
@@ -1212,7 +1416,7 @@ export default function App() {
         setPboRunning(false);
       }
     }, 30);
-  }, [draft, pboParams, pboBlocks, pboMaxCombos, dataset, rangeIdx]);
+  }, [draft, pboParams, pboBlocks, pboMaxCombos, wfaIsYears, wfaOsMonths, wfaMode, dataset, rangeIdx]);
 
   /* ---- 依目前日期範圍，切片＋重新正規化每個 run ＋ benchmark ---- */
   const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, tradeDistribution, icTableRows } = useMemo(() => {
@@ -1861,6 +2065,27 @@ export default function App() {
                   onChange={(e) => setPboMaxCombos(Math.min(2000, Math.max(4, Number(e.target.value))))}
                 />
               </div>
+              <div style={{ marginBottom: 10 }}>
+                <FieldLabel text="前向分析 (WFA)：視窗模式" />
+                <select value={wfaMode} onChange={(e) => setWfaMode(e.target.value)} style={selectStyle(S)}>
+                  <option value="rolling">滾動視窗（樣本內長度固定）</option>
+                  <option value="anchored">錨定視窗（樣本內自期初擴張）</option>
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <FieldLabel text="樣本內長度（年）" />
+                  <select value={wfaIsYears} onChange={(e) => setWfaIsYears(Number(e.target.value))} style={selectStyle(S)}>
+                    {[1, 2, 3, 4, 5].map((y) => <option key={y} value={y}>{y} 年</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <FieldLabel text="樣本外長度（月）" />
+                  <select value={wfaOsMonths} onChange={(e) => setWfaOsMonths(Number(e.target.value))} style={selectStyle(S)}>
+                    {[3, 6, 12].map((m) => <option key={m} value={m}>{m} 個月</option>)}
+                  </select>
+                </div>
+              </div>
               {(() => {
                 const estN = pboParams.reduce((a, p) => a * Math.max(1, Math.round(p.steps)), 1);
                 const comboMap = { 6: 20, 8: 70, 10: 252, 12: 924 };
@@ -2462,6 +2687,8 @@ export default function App() {
                         </Bar>
                       </BarChart>
                     </ResponsiveContainer>
+                    <WfaPanel S={S} wfa={pboResult.wfa} paramLabelMap={pboResult.paramLabelMap} />
+                    <OverfitEvaluation S={S} result={pboResult} />
                   </div>
                 )}
               </>
@@ -2477,6 +2704,7 @@ export default function App() {
               IC 以「策略當日多空方向（多方=+1／空方=-1）」與「隔日多空資產報酬價差」的皮爾森相關係數衡量，滾動IC為固定視窗、累計IC為自資料起點展開之視窗，IR = 滾動IC序列之均值/標準差；三者皆為訊號品質的輔助診斷，非直接等於策略報酬・
               PBO 採 Bailey et al. (2015) 之 CSCV 方法：以左側「參數1×參數2」網格產生 N 組候選策略，將樣本切成 S 個等長區塊，窮舉所有「一半區塊做樣本內(IS)、另一半做樣本外(OS)」的切分，記錄每次切分中樣本內表現最佳者在樣本外的相對名次並轉換為 logit(λ)，PBO = λ≤0 的切分比例；PBO 為診斷參數搜索穩健性的統計量，樣本仍受限於歷史資料本身，無法保證未來表現・
               候選策略平均相關係數：N 較大時以隨機抽樣（最多3000對）估計，避免全配對運算過慢；係數越高代表候選策略彼此越相似，PBO數字的變化較可能只反映候選集合的相關結構・
+              前向分析（WFA）：沿用同一組候選網格，每折於樣本內挑最佳參數、在緊接的樣本外檢驗，並把各折樣本外報酬串接評估；候選策略日報酬來自完整期間單次回測後切片，視窗邊界不另計換倉成本・綜合評價為依固定門檻產生的規則式摘要・
               DSR（Deflated Sharpe Ratio, Bailey & López de Prado 2014）：用N組候選中「樣本內Sharpe最高者」的偏態、峰態與樣本長度，估計其真實Sharpe仍優於「純運氣搜索N次後預期最大值」的機率，是PBO之外，另一個明確針對「搜索次數N」做多重比較修正的互補指標，兩者建議一起判讀，不宜只看其中一個。
             </div>
           </div>
@@ -2578,6 +2806,121 @@ function EmptyState({ S }) {
     </div>
   );
 }
+function WfaPanel({ S, wfa, paramLabelMap }) {
+  const thS = { padding: "6px 8px", fontSize: 10.5, fontWeight: 600, color: S.textMuted, textAlign: "right", whiteSpace: "nowrap", borderBottom: `1px solid ${S.border}` };
+  const tdS = { padding: "5px 8px", fontSize: 11, textAlign: "right", whiteSpace: "nowrap", borderBottom: `1px solid ${S.borderSoft}`, fontVariantNumeric: "tabular-nums" };
+  if (!wfa) return null;
+  if (wfa.error) {
+    return (
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${S.borderSoft}` }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>前向分析 (Walk Forward Analysis)</div>
+        <div style={{ fontSize: 12, color: S.rose }}>{wfa.error}</div>
+      </div>
+    );
+  }
+  const paramText = (p) => Object.entries(p).map(([k, v]) => `${paramLabelMap[k] || k}=${v}`).join("、");
+  return (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${S.borderSoft}` }}>
+      <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>前向分析 (Walk Forward Analysis)</div>
+      <div style={{ fontSize: 11, color: S.textFaint, marginBottom: 12, lineHeight: 1.6 }}>
+        {wfa.mode === "anchored" ? "錨定視窗" : "滾動視窗"}・樣本內{wfa.mode === "anchored" ? "自期初起擴張（最短 " : " "}{wfa.isYears} 年{wfa.mode === "anchored" ? "）" : ""}・樣本外 {wfa.osMonths} 個月・共 {wfa.foldCount} 折。
+        每折在樣本內從候選網格挑 Sharpe 最高者，再看它在緊接著的樣本外表現；下列績效是把各折樣本外串接而成（約 {wfa.oosDays} 個交易日），Sharpe 已年化、未扣無風險利率。
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 24, marginBottom: 14 }}>
+        <StatBlock S={S} label="串接樣本外 Sharpe" value={num(wfa.oosSharpe, 2)} big highlight={wfa.oosSharpe > 0.5 ? "teal" : wfa.oosSharpe > 0 ? "gold" : "rose"} />
+        <StatBlock S={S} label="串接樣本外 CAGR" value={pct(wfa.oosCagr, 1)} />
+        <StatBlock S={S} label="串接樣本外最大回撤" value={pct(wfa.oosMdd, 1)} />
+        <StatBlock S={S} label="平均樣本內 Sharpe" value={num(wfa.meanIS, 2)} />
+        <StatBlock S={S} label="WFE（樣本外/樣本內 Sharpe）" value={wfa.wfe == null ? "—" : num(wfa.wfe, 2)} highlight={wfa.wfe == null ? null : wfa.wfe >= 0.5 ? "teal" : wfa.wfe >= 0.25 ? "gold" : "rose"} />
+        <StatBlock S={S} label="樣本外正報酬折數" value={pct(wfa.posFolds, 0)} />
+        <StatBlock S={S} label="勝過候選中位數折數" value={pct(wfa.beatMedian, 0)} />
+        <StatBlock S={S} label="選中參數的平均樣本外名次" value={pct(wfa.meanRankPct, 0)} />
+        <StatBlock S={S} label="候選中位數樣本外 Sharpe" value={num(wfa.medianCandSharpe, 2)} />
+      </div>
+      <div style={{ overflowX: "auto", maxHeight: 260, overflowY: "auto", border: `1px solid ${S.borderSoft}`, borderRadius: 4 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead style={{ position: "sticky", top: 0, background: S.panel }}>
+            <tr>
+              <th style={{ ...thS, textAlign: "left" }}>#</th>
+              <th style={{ ...thS, textAlign: "left" }}>樣本內期間</th>
+              <th style={{ ...thS, textAlign: "left" }}>樣本外期間</th>
+              <th style={{ ...thS, textAlign: "left" }}>該折選出的參數</th>
+              <th style={thS}>樣本內 Sharpe</th>
+              <th style={thS}>樣本外 Sharpe</th>
+              <th style={thS}>樣本外報酬</th>
+              <th style={thS}>樣本外名次</th>
+            </tr>
+          </thead>
+          <tbody>
+            {wfa.folds.map((f, i) => (
+              <tr key={i}>
+                <td style={{ ...tdS, textAlign: "left", color: S.textFaint }}>{i + 1}</td>
+                <td style={{ ...tdS, textAlign: "left", color: S.textMuted }}>{f.isFrom} ~ {f.isTo}</td>
+                <td style={{ ...tdS, textAlign: "left", color: S.textMuted }}>{f.osFrom} ~ {f.osTo}</td>
+                <td style={{ ...tdS, textAlign: "left" }}>{paramText(f.params)}</td>
+                <td style={tdS}>{num(f.isSharpe, 2)}</td>
+                <td style={{ ...tdS, color: f.osSharpe > 0 ? S.teal : S.rose }}>{num(f.osSharpe, 2)}</td>
+                <td style={{ ...tdS, color: f.osReturn > 0 ? S.teal : S.rose }}>{pct(f.osReturn, 1)}</td>
+                <td style={tdS}>{pct(f.rankPct, 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: S.textFaint, marginTop: 8, lineHeight: 1.6 }}>
+        名次＝該折選出者的樣本外 Sharpe 勝過多少比例的其他候選（100% 為最佳、50% 為中位數）。WFE 越接近或高於 1，代表樣本內的優勢較能延續到樣本外；明顯偏低（如 &lt; 0.5）代表樣本內表現多半縮水。
+      </div>
+    </div>
+  );
+}
+
+function OverfitEvaluation({ S, result }) {
+  const ev = evaluateOverfitting(result);
+  const toneColor = ev.tone === "teal" ? S.teal : ev.tone === "gold" ? S.gold : S.rose;
+  const verdictColor = (v) => (v === "良好" ? S.teal : v === "尚可" ? S.gold : v === "無法計算" ? S.textFaint : S.rose);
+  return (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${S.borderSoft}` }}>
+      <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>過擬合綜合評價</div>
+      <div style={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderLeft: `3px solid ${toneColor}`, borderRadius: 4, padding: "10px 14px", marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: toneColor }}>{ev.level}</div>
+        <div style={{ fontSize: 11, color: S.textFaint, marginTop: 2 }}>
+          綜合得分 {ev.total} / {ev.maxTotal}（PBO、DSR、前向分析各 0~2 分；候選策略平均相關係數不計分，僅用來調整對其他指標的信任程度）
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+        {ev.items.map((it) => (
+          <div key={it.key} style={{ fontSize: 12, lineHeight: 1.6 }}>
+            <span style={{ fontWeight: 600 }}>{it.key}</span>
+            <span style={{ color: S.textMuted }}>　{it.valueText}　</span>
+            <span style={{ color: verdictColor(it.verdict), fontWeight: 600 }}>{it.verdict}</span>
+            <span style={{ color: S.textFaint, fontSize: 10.5 }}>　（{it.rule}）</span>
+            <div style={{ color: S.textMuted, fontSize: 11.5 }}>{it.detail}</div>
+          </div>
+        ))}
+      </div>
+      {ev.notes.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: S.textMuted, marginBottom: 4 }}>交叉判讀</div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, color: S.textMuted, lineHeight: 1.7 }}>
+            {ev.notes.map((n, i) => <li key={i}>{n}</li>)}
+          </ul>
+        </div>
+      )}
+      {ev.advice.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: S.textMuted, marginBottom: 4 }}>建議</div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, color: S.textMuted, lineHeight: 1.7 }}>
+            {ev.advice.map((n, i) => <li key={i}>{n}</li>)}
+          </ul>
+        </div>
+      )}
+      <div style={{ fontSize: 10.5, color: S.textFaint, lineHeight: 1.6 }}>
+        此評價是依固定門檻自動產生的規則式摘要，用來幫助快速判讀，並非統計檢定或投資建議；各門檻（20%／50%／95% 等）為常見經驗值。所有指標都建立在同一段歷史資料上，無法取代真正未見過的新資料驗證。
+      </div>
+    </div>
+  );
+}
+
 function StatBlock({ S, label, value, big = false, highlight = null }) {
   const color = highlight === "rose" ? S.rose : highlight === "gold" ? S.gold : highlight === "teal" ? S.teal : S.text;
   return (
