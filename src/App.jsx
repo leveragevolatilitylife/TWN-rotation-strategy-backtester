@@ -1447,6 +1447,17 @@ export default function App() {
         if (a) prevAsset = a;
       }
       const stats = computeStats(sliced, tradesInRange, run.config.riskFreeRate);
+      // 做多持倉天數佔比：所選區間內（與日報酬同一組交易日），持有多方標的（bullAsset）的天數 / 總交易日數
+      let longDays = 0;
+      let heldDays = 0;
+      for (let i = startIdx + 1; i <= endIdx; i++) {
+        const a = run.appliedAsset[i];
+        if (!a) continue;
+        heldDays += 1;
+        if (a === run.config.bullAsset) longDays += 1;
+      }
+      stats.longShare = heldDays > 0 ? longDays / heldDays : null;
+      stats.longAsset = run.config.bullAsset;
       // 換倉標記：appliedAsset 在區間內由一檔轉為另一檔的日期（輪動以當日開盤價執行）
       const runMarkers = [];
       let prevA = null;
@@ -2278,12 +2289,13 @@ export default function App() {
                     <Th>日勝率</Th>
                     <Th>換手次數</Th>
                     <Th>交易頻率(天/次)</Th>
+                    <Th>做多持倉天數佔比</Th>
                   </tr>
                 </thead>
                 <tbody>
                   {tableRows.length === 0 && (
                     <tr>
-                      <td colSpan={14} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
+                      <td colSpan={15} style={{ padding: 16, textAlign: "center", color: S.textFaint, fontFamily: "ui-sans-serif" }}>
                         尚未加入任何策略或對照組。
                       </td>
                     </tr>
@@ -2315,6 +2327,11 @@ export default function App() {
                       <Td>{pct(row.winRate)}</Td>
                       <Td>{row.trades}</Td>
                       <Td>{row.tradeFreqDays == null ? "—" : num(row.tradeFreqDays, 1)}</Td>
+                      <Td>
+                        {row.longShare == null ? "—" : (
+                          <span title={`持有 ${assetShort(row.longAsset)} 的交易日 / 總持倉交易日`}>{pct(row.longShare)}</span>
+                        )}
+                      </Td>
                     </tr>
                   ))}
                 </tbody>
@@ -2700,7 +2717,7 @@ export default function App() {
               5 組預設策略的參數（均線天數/基準、VIX滾動視窗與分位門檻、Hybrid合併模式）皆由原始試算表公式逐一比對確認；手續費率預設為標準（未折扣）費率0.1425%，原始試算表實際採用之折扣費率為0.1425%×0.6=0.0855%且每次輪動僅合併扣除一次，本工具則對賣出與買進各計一次（較符合實際交易機制），如需貼近原始試算表可將左側手續費率調整為0.0855%參考，惟仍會因計費次數不同而略有落差，非計算錯誤・
               台股資料的VX30:VIX Roll Yield回溯至2007年（讓VIX滾動視窗從回測期間一開始就有足夠暖身資料，不需等待數年才產生訊號），但各ETF在上市之前於原始檔案中是回填的佔位資料，因此「回測期間」的起始日鎖定在錨點標的（0050）真正有行情的第一天；若所選標的更晚上市，側欄會提示真實行情的起始日。
               VIX 分位門檻採「滾動視窗」逐日重新計算，避免使用未來資料・CAGR 以 252 個交易日/年換算，Sharpe／Sortino 以日報酬年化並扣除設定之無風險利率，Sortino 僅計入低於無風險利率之下方波動・
-              Ulcer Index 為回撤深度的均方根（%），UPI = (CAGR% − 無風險利率%) / Ulcer Index・回撤曲線與 Ulcer Index／最大回撤使用同一套「相對歷史高點」定義・「交易分析」表以「每次輪動買進到下次輪動賣出」為一筆交易，勝率／賠率／期望值皆以此為單位計算，僅計入完整落於所選日期範圍內、且已平倉的交易；期末仍持有中的部位不計入・
+              「做多持倉天數佔比」＝所選期間內持有該策略多方標的（如 00631L）的交易日 / 總交易日（買進持有對照組不適用）・Ulcer Index 為回撤深度的均方根（%），UPI = (CAGR% − 無風險利率%) / Ulcer Index・回撤曲線與 Ulcer Index／最大回撤使用同一套「相對歷史高點」定義・「交易分析」表以「每次輪動買進到下次輪動賣出」為一筆交易，勝率／賠率／期望值皆以此為單位計算，僅計入完整落於所選日期範圍內、且已平倉的交易；期末仍持有中的部位不計入・
               IC 以「策略當日多空方向（多方=+1／空方=-1）」與「隔日多空資產報酬價差」的皮爾森相關係數衡量，滾動IC為固定視窗、累計IC為自資料起點展開之視窗，IR = 滾動IC序列之均值/標準差；三者皆為訊號品質的輔助診斷，非直接等於策略報酬・
               PBO 採 Bailey et al. (2015) 之 CSCV 方法：以左側「參數1×參數2」網格產生 N 組候選策略，將樣本切成 S 個等長區塊，窮舉所有「一半區塊做樣本內(IS)、另一半做樣本外(OS)」的切分，記錄每次切分中樣本內表現最佳者在樣本外的相對名次並轉換為 logit(λ)，PBO = λ≤0 的切分比例；PBO 為診斷參數搜索穩健性的統計量，樣本仍受限於歷史資料本身，無法保證未來表現・
               候選策略平均相關係數：N 較大時以隨機抽樣（最多3000對）估計，避免全配對運算過慢；係數越高代表候選策略彼此越相似，PBO數字的變化較可能只反映候選集合的相關結構・
