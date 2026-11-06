@@ -15,6 +15,7 @@ import {
   Tooltip,
   Legend,
   ReferenceDot,
+  ReferenceLine,
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
@@ -1177,6 +1178,9 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
 const pct = (x, digits = 1) => (x == null || Number.isNaN(x) ? "—" : `${(x * 100).toFixed(digits)}%`);
 const num = (x, digits = 2) => (x == null || Number.isNaN(x) ? "—" : x.toFixed(digits));
 const fmtMultiple = (x) => `${x.toFixed(3)}x`;
+// 權益曲線縱軸改用「累計報酬率(%)」：權益倍數 m → (m − 1) × 100。線性座標直接畫報酬率；對數座標仍以倍數作圖（對數軸不能含負值），刻度標示成對應的報酬率。
+const fmtReturnPct = (pctValue, digits = 1) => `${pctValue >= 0 ? "+" : ""}${pctValue.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}%`;
+const fmtTickPct = (pctValue) => `${pctValue >= 0 ? "" : "−"}${Math.abs(Math.round(pctValue)).toLocaleString("en-US")}%`;
 
 function downsampleForChart(points, target = 480, keepDates = null) {
   if (points.length <= target) return points;
@@ -1579,6 +1583,21 @@ export default function App() {
       icTableRows: icTable,
     };
   }, [runs, benchOn, dataset, rangeIdx, market]);
+
+  // 權益曲線實際繪製的資料：線性座標轉成累計報酬率(%)，對數座標維持倍數
+  const equityPlot = useMemo(() => {
+    if (logScale) return { points: chartData.points, markers: chartData.markers };
+    const toPct = (m) => (m - 1) * 100;
+    const keys = chartData.series.map((s) => s.key);
+    const points = chartData.points.map((pt) => {
+      const o = { date: pt.date };
+      for (const k of keys) o[k] = pt[k] == null ? pt[k] : toPct(pt[k]);
+      return o;
+    });
+    const markers = {};
+    for (const [k, arr] of Object.entries(chartData.markers)) markers[k] = arr.map((m) => ({ ...m, value: toPct(m.value) }));
+    return { points, markers };
+  }, [chartData, logScale]);
 
 
   const S = THEME;
@@ -2137,7 +2156,7 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <TrendingUp size={15} color={S.textMuted} />
-                <span style={{ fontSize: 13, fontWeight: 600 }}>權益曲線（期初 = 1.0）</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>權益曲線（累計報酬率，期初 = 0%）</span>
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: S.textMuted, cursor: "pointer" }}>
                 <input className="chk" type="checkbox" checked={logScale} onChange={(e) => setLogScale(e.target.checked)} />
@@ -2150,7 +2169,7 @@ export default function App() {
                 <EmptyState S={S} />
               ) : (
                 <ResponsiveContainer width="100%" height={420}>
-                  <LineChart data={chartData.points} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
+                  <LineChart data={equityPlot.points} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
                     <CartesianGrid stroke={S.borderSoft} vertical={false} />
                     <XAxis
                       dataKey="date"
@@ -2162,18 +2181,19 @@ export default function App() {
                       tick={{ fontSize: 10, fill: S.textFaint }}
                       stroke={S.border}
                       scale={logScale ? "log" : "linear"}
-                      domain={logScale ? ["auto", "auto"] : [0, "auto"]}
-                      tickFormatter={(v) => v.toFixed(1) + "x"}
-                      width={44}
+                      domain={["auto", "auto"]}
+                      tickFormatter={(v) => fmtTickPct(logScale ? (v - 1) * 100 : v)}
+                      width={58}
                     />
+                    {!logScale && <ReferenceLine y={0} stroke={S.textFaint} strokeDasharray="3 3" />}
                     <Tooltip
                       // 提示框固定在圖左上角空白處（權益曲線由左下往右上走），不跟著滑鼠移動，避免遮住曲線與換倉標記
-                      position={{ x: 52, y: 6 }}
+                      position={{ x: 66, y: 6 }}
                       isAnimationActive={false}
                       wrapperStyle={{ pointerEvents: "none", zIndex: 5 }}
                       contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11, opacity: 0.94 }}
                       labelStyle={{ color: S.textMuted }}
-                      formatter={(v, n) => [fmtMultiple(v), n]}
+                      formatter={(v, n) => [fmtReturnPct(logScale ? (v - 1) * 100 : v, 1), n]}
                     />
                     <Legend wrapperStyle={{ fontSize: 11, color: S.textMuted }} />
                     {chartData.series.map((s) => (
@@ -2190,7 +2210,7 @@ export default function App() {
                       />
                     ))}
                     {/* 透明加粗的感應線：讓滑鼠容易停在策略曲線上，不影響圖例與提示框 */}
-                    {chartData.series.filter((s) => chartData.markers[s.key]).map((s) => (
+                    {chartData.series.filter((s) => equityPlot.markers[s.key]).map((s) => (
                       <Line
                         key={`hover_${s.key}`}
                         type="monotone"
@@ -2207,7 +2227,7 @@ export default function App() {
                       />
                     ))}
                     {hoverRunKey &&
-                      (chartData.markers[hoverRunKey] || []).map((m, i) => (
+                      (equityPlot.markers[hoverRunKey] || []).map((m, i) => (
                         <ReferenceDot
                           key={`${hoverRunKey}_${m.date}_${i}`}
                           x={m.date}
@@ -2221,7 +2241,7 @@ export default function App() {
                 </ResponsiveContainer>
               )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的權益位置；Buy &amp; Hold 對照組無換倉標記）。
+                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
