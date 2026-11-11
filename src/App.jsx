@@ -185,6 +185,38 @@ function computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, hi
   return sig;
 }
 
+/* 訊號確認(遲滯)：新訊號須連續 k 個交易日一致才切換，用來降低 VIX 訊號來回翻轉造成的換手與成本。k<=1 時不做任何處理。 */
+function confirmSignal(sig, k) {
+  if (!k || k <= 1) return sig;
+  const out = new Array(sig.length).fill(null);
+  let cur = null;
+  let cand = null;
+  let cnt = 0;
+  for (let i = 0; i < sig.length; i++) {
+    const s = sig[i];
+    if (s == null) continue;
+    if (cur == null) {
+      cur = s;
+    } else if (s === cur) {
+      cand = null;
+      cnt = 0;
+    } else {
+      if (cand === s) cnt++;
+      else {
+        cand = s;
+        cnt = 1;
+      }
+      if (cnt >= k) {
+        cur = s;
+        cand = null;
+        cnt = 0;
+      }
+    }
+    out[i] = cur;
+  }
+  return out;
+}
+
 function computeVixSignal(rollYield, lookback, mode, highPct, lowPct, extremeLowPct) {
   const sortedWindows = computeRollingSortedWindows(rollYield, lookback);
   return computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, highPct, lowPct, extremeLowPct);
@@ -458,7 +490,7 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     const sa = cfg.signalAsset || dataset.anchor;
     sigA = computeMASignal(dataset.prices[sa], dataset.opens[sa] || dataset.prices[sa], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close");
   }
-  if (cfg.vixEnabled) sigB = computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
+  if (cfg.vixEnabled) sigB = confirmSignal(computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow), cfg.vixConfirmDays);
   const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
 
   const { equity, appliedAsset, trades, tradeList } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
@@ -614,6 +646,7 @@ function getAvailableParams(draft) {
   if (draft.vixEnabled) {
     opts.push({ key: "vixLookback", label: "VIX滾動視窗(天)", isInt: true, defMin: 504, defMax: 1512 });
     opts.push({ key: "vixHigh", label: "VIX高分位門檻(%)", isInt: false, defMin: 15, defMax: 45 });
+    opts.push({ key: "vixConfirmDays", label: "VIX訊號確認天數", isInt: true, defMin: 0, defMax: 8 });
     if (draft.vixMode === "advanced") {
       opts.push({ key: "vixLow", label: "VIX低分位門檻(%)", isInt: false, defMin: 0.5, defMax: 5 });
       opts.push({ key: "vixExtremeLow", label: "VIX極低分位門檻(%)", isInt: false, defMin: 0.1, defMax: 2 });
@@ -1096,7 +1129,7 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
     return maCache.get(k);
   };
   const getVixSignal = (cfg) => {
-    const k = `${cfg.vixLookback}|${cfg.vixMode}|${cfg.vixHigh}|${cfg.vixLow}|${cfg.vixExtremeLow}`;
+    const k = `${cfg.vixLookback}|${cfg.vixMode}|${cfg.vixHigh}|${cfg.vixLow}|${cfg.vixExtremeLow}|${cfg.vixConfirmDays || 0}`;
     if (!vixSignalCache.has(k)) {
       if (!vixWindowCache.has(cfg.vixLookback)) {
         vixWindowCache.set(cfg.vixLookback, computeRollingSortedWindows(dataset.rollYield, cfg.vixLookback));
@@ -1104,7 +1137,10 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
       const windows = vixWindowCache.get(cfg.vixLookback);
       vixSignalCache.set(
         k,
-        computeVixSignalFromSorted(dataset.rollYield, windows, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow)
+        confirmSignal(
+          computeVixSignalFromSorted(dataset.rollYield, windows, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow),
+          cfg.vixConfirmDays
+        )
       );
     }
     return vixSignalCache.get(k);
@@ -1239,6 +1275,7 @@ export default function App() {
     vixHigh: 28,
     vixLow: 1,
     vixExtremeLow: 0.5,
+    vixConfirmDays: 0,
     combineMode: "AND",
     bullAsset: MARKET_META.TW.defaultBull,
     bearAsset: MARKET_META.TW.defaultBear,
@@ -1850,6 +1887,11 @@ export default function App() {
                   </>
                 )}
                 {draft.vixMode === "simple" && <HintText text={`規則：RollYield > 高分位 → 多方；其餘 → 空方`} />}
+                <div>
+                  <FieldLabel text="訊號確認天數（0＝不啟用）" />
+                  <input type="number" value={draft.vixConfirmDays ?? 0} min={0} max={20} step={1} onChange={(e) => setDraft((d) => ({ ...d, vixConfirmDays: Math.max(0, Math.round(Number(e.target.value))) }))} />
+                  <HintText text="VIX 新訊號須連續 N 個交易日一致才切換（遲滯），可降低來回翻轉與交易成本；回測顯示對 Hybrid 較有幫助、對 Hybrid II 無益。" />
+                </div>
               </div>
             )}
 
