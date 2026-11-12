@@ -1426,11 +1426,34 @@ export default function App() {
   }, [draft, pboParams, pboBlocks, pboMaxCombos, wfaIsYears, wfaOsMonths, wfaMode, dataset, rangeIdx]);
 
   /* ---- 依目前日期範圍，切片＋重新正規化每個 run ＋ benchmark ---- */
-  const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, tradeDistribution, icTableRows } = useMemo(() => {
+  const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, tradeDistribution, icTableRows, statWindow } = useMemo(() => {
     const { startIdx, endIdx } = rangeIdx;
     const slicedDates = dataset.dates.slice(startIdx, endIdx + 1);
     const rangeStartDate = slicedDates[0];
     const rangeEndDate = slicedDates[slicedDates.length - 1];
+
+    // 縮放且勾選「區間起點歸零」時：回撤曲線、整體績效、交易統計改以縮放區間重算
+    let zi0 = 0;
+    let zi1 = slicedDates.length - 1;
+    if (zoomRebase && zoom && slicedDates.length) {
+      const a = slicedDates.findIndex((d) => d >= zoom.s);
+      zi0 = a < 0 ? zi1 : a;
+      let b = zi1;
+      while (b > zi0 && slicedDates[b] > zoom.e) b--;
+      zi1 = b;
+    }
+    const zActive = zi0 > 0 || zi1 < slicedDates.length - 1;
+    const wSlice = (arr) => {
+      if (!zActive) return arr;
+      const w = arr.slice(zi0, zi1 + 1);
+      const b0 = w[0];
+      return w.map((v) => v / b0);
+    };
+    const sI = startIdx + zi0; // 統計區間（絕對索引）
+    const eI = startIdx + zi1;
+    const statStartDate = slicedDates[zi0];
+    const statEndDate = slicedDates[zi1];
+    const ddDates = zActive ? slicedDates.slice(zi0, zi1 + 1) : slicedDates;
 
     const series = [];
     const ddSeries = [];
@@ -1445,19 +1468,20 @@ export default function App() {
 
     for (const run of runs) {
       const sliced = sliceAndNormalize(run.equity, startIdx, endIdx);
-      const ddData = computeDrawdownPct(sliced);
+      const wSliced = wSlice(sliced);
+      const ddData = computeDrawdownPct(wSliced);
       let tradesInRange = 0;
       let prevAsset = null;
-      for (let i = startIdx; i <= endIdx; i++) {
+      for (let i = sI; i <= eI; i++) {
         const a = run.appliedAsset[i];
         if (a && prevAsset && a !== prevAsset) tradesInRange += 1;
         if (a) prevAsset = a;
       }
-      const stats = computeStats(sliced, tradesInRange, run.config.riskFreeRate);
+      const stats = computeStats(wSliced, tradesInRange, run.config.riskFreeRate);
       // 做多持倉天數佔比：所選區間內（與日報酬同一組交易日），持有多方標的（bullAsset）的天數 / 總交易日數
       let longDays = 0;
       let heldDays = 0;
-      for (let i = startIdx + 1; i <= endIdx; i++) {
+      for (let i = sI + 1; i <= eI; i++) {
         const a = run.appliedAsset[i];
         if (!a) continue;
         heldDays += 1;
@@ -1490,7 +1514,7 @@ export default function App() {
         isBench: false,
         // 最新持倉：依「目前所選日期區間的結束日」回頭找最後一個有效持倉（不可使用建立 run 時快取的值）
         lastAsset: (() => {
-          for (let i = endIdx; i >= 0; i--) if (run.appliedAsset[i]) return run.appliedAsset[i];
+          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.appliedAsset[i];
           return null;
         })(),
         ...stats,
@@ -1498,7 +1522,7 @@ export default function App() {
 
       // 交易區間分析：僅計入完整落於所選日期範圍內的持倉區間
       const tradesInWindow = run.tradeList.filter(
-        (t) => t.entryDate >= rangeStartDate && t.exitDate <= rangeEndDate
+        (t) => t.entryDate >= statStartDate && t.exitDate <= statEndDate
       );
       const tstats = computeTradeStats(tradesInWindow);
       tradeTable.push({ id: run.id, name: run.name, color: run.color, ...tstats });
@@ -1506,7 +1530,9 @@ export default function App() {
         id: run.id,
         name: run.name,
         color: run.color,
-        values: tradesInWindow.filter((t) => !t.open).map((t) => t.returnPct),
+        values: run.tradeList
+          .filter((t) => t.entryDate >= rangeStartDate && t.exitDate <= rangeEndDate && !t.open)
+          .map((t) => t.returnPct),
       });
 
       // IC / IR 分析
@@ -1533,8 +1559,9 @@ export default function App() {
       if (!isBenchOn(assetKey)) continue;
       const bh = buyHoldCurve(dataset, assetKey);
       const sliced = sliceAndNormalize(bh, startIdx, endIdx);
-      const ddData = computeDrawdownPct(sliced);
-      const stats = computeStats(sliced, 0, 1.5);
+      const wBh = wSlice(sliced);
+      const ddData = computeDrawdownPct(wBh);
+      const stats = computeStats(wBh, 0, 1.5);
       series.push({
         key: `bh_${assetKey}`,
         name: `Buy & Hold ${assetShort(assetKey)}`,
@@ -1560,14 +1587,14 @@ export default function App() {
     }
 
     // 組合成 recharts 需要的格式：[{date, seriesKey1: v, seriesKey2: v, ...}]
-    const buildPoints = (seriesArr) =>
-      slicedDates.map((d, i) => {
+    const buildPoints = (seriesArr, dates = slicedDates) =>
+      dates.map((d, i) => {
         const point = { date: d };
         for (const s of seriesArr) point[s.key] = s.data[i];
         return point;
       });
     const chartPoints = downsampleForChart(buildPoints(series), 4000, keepDates);
-    const ddPoints = downsampleForChart(buildPoints(ddSeries), 4000);
+    const ddPoints = downsampleForChart(buildPoints(ddSeries, ddDates), 4000);
     const icRollPoints = downsampleForChart(buildPoints(icRollSeries), 480);
     const icExpPoints = downsampleForChart(buildPoints(icExpSeries), 480);
 
@@ -1584,8 +1611,9 @@ export default function App() {
       tradeTableRows: tradeTable,
       tradeDistribution: buildReturnDistribution(distRunsData),
       icTableRows: icTable,
+      statWindow: zActive ? { s: statStartDate, e: statEndDate, days: zi1 - zi0 } : null,
     };
-  }, [runs, benchOn, dataset, rangeIdx, market]);
+  }, [runs, benchOn, dataset, rangeIdx, market, zoom, zoomRebase]);
 
   // 縮放區間在完整資料中的索引（以日期比對，切換回測區間或標的後自動夾回合法範圍）
   const zoomIdx = useMemo(() => {
@@ -2318,7 +2346,7 @@ export default function App() {
                 </ResponsiveContainer>
               )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                拖曳下方滑桿兩端或點選快捷鈕可縮放時間段（回撤曲線同步；回撤仍以全期歷史高點計算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
+                拖曳下方滑桿兩端或點選快捷鈕可縮放時間段（回撤曲線同步。未勾選「區間起點歸零」時，回撤與整體績效維持全期視角；勾選後，權益曲線、回撤曲線、整體績效與交易統計都以縮放區間重算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
@@ -2367,7 +2395,15 @@ export default function App() {
               )}
             </div>
 
-            <div style={{ marginTop: 22, marginBottom: 8, fontSize: 13, fontWeight: 600 }}>整體績效</div>
+            <div style={{ marginTop: 22, marginBottom: 8, fontSize: 13, fontWeight: 600 }}>
+              整體績效
+              {statWindow && (
+                <span className="mono" style={{ marginLeft: 10, fontSize: 11.5, fontWeight: 400, color: S.gold }}>
+                  統計區間（縮放）：{statWindow.s} ～ {statWindow.e}（{statWindow.days} 個交易日）
+                  {statWindow.days < 252 && " ⚠ 不足 1 年，年化數值（CAGR、波動、Sharpe 等）僅供參考"}
+                </span>
+              )}
+            </div>
             <div style={{ overflowX: "auto", border: `1px solid ${S.border}`, borderRadius: 6 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }} className="mono">
                 <thead>
