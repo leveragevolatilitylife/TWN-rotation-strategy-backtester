@@ -16,6 +16,7 @@ import {
   Legend,
   ReferenceDot,
   ReferenceLine,
+  Brush,
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
@@ -1279,6 +1280,8 @@ export default function App() {
   const [benchOn, setBenchOn] = useState({}); // 對照組勾選狀態：未設定者預設只勾「多方預設標的」與「錨點標的」
   const isBenchOn = (k) => benchOn[k] ?? (k === marketMeta.defaultBull || k === dataset.anchor);
   const [logScale, setLogScale] = useState(false);
+  const [zoom, setZoom] = useState(null); // 縮放區間 {s, e}（日期字串），null＝顯示全部
+  const [zoomRebase, setZoomRebase] = useState(false); // 縮放後權益曲線以區間起點歸零
   const [hoverRunKey, setHoverRunKey] = useState(null); // 滑鼠停在哪條策略曲線上（用於浮現換倉標記）
   const [configError, setConfigError] = useState(null);
 
@@ -1563,8 +1566,8 @@ export default function App() {
         for (const s of seriesArr) point[s.key] = s.data[i];
         return point;
       });
-    const chartPoints = downsampleForChart(buildPoints(series), 480, keepDates);
-    const ddPoints = downsampleForChart(buildPoints(ddSeries), 480);
+    const chartPoints = downsampleForChart(buildPoints(series), 4000, keepDates);
+    const ddPoints = downsampleForChart(buildPoints(ddSeries), 4000);
     const icRollPoints = downsampleForChart(buildPoints(icRollSeries), 480);
     const icExpPoints = downsampleForChart(buildPoints(icExpSeries), 480);
 
@@ -1584,21 +1587,58 @@ export default function App() {
     };
   }, [runs, benchOn, dataset, rangeIdx, market]);
 
-  // 權益曲線實際繪製的資料：線性座標轉成累計報酬率(%)，對數座標維持倍數
+  // 縮放區間在完整資料中的索引（以日期比對，切換回測區間或標的後自動夾回合法範圍）
+  const zoomIdx = useMemo(() => {
+    const pts = chartData.points;
+    if (!zoom || pts.length === 0) return { a: 0, b: Math.max(0, pts.length - 1) };
+    let a = pts.findIndex((p) => p.date >= zoom.s);
+    if (a < 0) a = pts.length - 1;
+    let b = pts.length - 1;
+    while (b > a && pts[b].date > zoom.e) b--;
+    return { a, b };
+  }, [chartData, zoom]);
+  const isZoomed = zoom != null && (zoomIdx.a > 0 || zoomIdx.b < chartData.points.length - 1);
+  const setZoomByIdx = (a, b) => {
+    const pts = chartData.points;
+    if (!pts.length) return;
+    if (a <= 0 && b >= pts.length - 1) return setZoom(null);
+    setZoom({ s: pts[Math.max(0, a)].date, e: pts[Math.min(pts.length - 1, b)].date });
+  };
+  const zoomLastYears = (yrs) => {
+    const pts = chartData.points;
+    if (!pts.length) return;
+    const last = pts[pts.length - 1].date;
+    const d = new Date(last);
+    d.setFullYear(d.getFullYear() - yrs);
+    const startStr = d.toISOString().slice(0, 10);
+    setZoom(startStr <= pts[0].date ? null : { s: startStr, e: last });
+  };
+  const inZoom = (d) => !isZoomed || (d >= zoom.s && d <= zoom.e);
+
+  // 權益曲線實際繪製的資料：套用縮放；線性座標轉成累計報酬率(%)，對數座標維持倍數
   const equityPlot = useMemo(() => {
-    if (logScale) return { points: chartData.points, markers: chartData.markers };
-    const toPct = (m) => (m - 1) * 100;
     const keys = chartData.series.map((s) => s.key);
-    const points = chartData.points.map((pt) => {
+    let pts = isZoomed ? chartData.points.filter((p) => inZoom(p.date)) : chartData.points;
+    const base = {};
+    for (const k of keys) base[k] = zoomRebase && isZoomed && pts.length ? pts[0][k] : 1;
+    const norm = (k, v) => (v == null ? v : v / (base[k] || 1));
+    const toPct = (m) => (m - 1) * 100;
+    const tf = (k, v) => (logScale ? norm(k, v) : v == null ? v : toPct(norm(k, v)));
+    const points = pts.map((pt) => {
       const o = { date: pt.date };
-      for (const k of keys) o[k] = pt[k] == null ? pt[k] : toPct(pt[k]);
+      for (const k of keys) o[k] = tf(k, pt[k]);
       return o;
     });
     const markers = {};
-    for (const [k, arr] of Object.entries(chartData.markers)) markers[k] = arr.map((m) => ({ ...m, value: toPct(m.value) }));
+    for (const [k, arr] of Object.entries(chartData.markers))
+      markers[k] = arr.filter((m) => inZoom(m.date)).map((m) => ({ ...m, value: tf(k, m.value) }));
     return { points, markers };
-  }, [chartData, logScale]);
+  }, [chartData, logScale, zoom, zoomRebase, isZoomed]);
 
+  const ddZoomPoints = useMemo(
+    () => (isZoomed ? drawdownChartData.points.filter((p) => inZoom(p.date)) : drawdownChartData.points),
+    [drawdownChartData, zoom, isZoomed]
+  );
 
   const S = THEME;
 
@@ -2164,6 +2204,24 @@ export default function App() {
               </label>
             </div>
 
+            {chartData.series.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11.5 }}>
+                <span style={{ color: S.textMuted }}>縮放：</span>
+                {[["全部", null], ["近1年", 1], ["近3年", 3], ["近5年", 5]].map(([lb, y]) => (
+                  <button key={lb} className="btn" onClick={() => (y == null ? setZoom(null) : zoomLastYears(y))}
+                    style={{ padding: "2px 9px", fontSize: 11.5, cursor: "pointer", background: S.panelAlt, color: S.text, border: `1px solid ${S.border}`, borderRadius: 4 }}>
+                    {lb}
+                  </button>
+                ))}
+                <label style={{ display: "flex", alignItems: "center", gap: 5, color: S.textMuted, cursor: "pointer", marginLeft: 6 }}>
+                  <input className="chk" type="checkbox" checked={zoomRebase} onChange={(e) => setZoomRebase(e.target.checked)} />
+                  區間起點歸零
+                </label>
+                <span style={{ color: S.textFaint, marginLeft: "auto" }} className="mono">
+                  {chartData.points[zoomIdx.a]?.date} ～ {chartData.points[zoomIdx.b]?.date}
+                </span>
+              </div>
+            )}
             <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 6, padding: "12px 8px 4px" }}>
               {chartData.series.length === 0 ? (
                 <EmptyState S={S} />
@@ -2240,8 +2298,27 @@ export default function App() {
                   </LineChart>
                 </ResponsiveContainer>
               )}
+              {chartData.series.length > 0 && (
+                <ResponsiveContainer width="100%" height={54}>
+                  <LineChart data={chartData.points} margin={{ top: 2, right: 16, bottom: 0, left: 58 }}>
+                    <Line type="monotone" dataKey={chartData.series[0].key} stroke={S.textFaint} dot={false} strokeWidth={1} isAnimationActive={false} />
+                    <Brush
+                      dataKey="date"
+                      height={34}
+                      travellerWidth={8}
+                      stroke={S.textFaint}
+                      fill={S.panelAlt}
+                      startIndex={zoomIdx.a}
+                      endIndex={zoomIdx.b}
+                      onChange={(r) => {
+                        if (r && (r.startIndex !== zoomIdx.a || r.endIndex !== zoomIdx.b)) setZoomByIdx(r.startIndex, r.endIndex);
+                      }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
+                拖曳下方滑桿兩端或點選快捷鈕可縮放時間段（回撤曲線同步；回撤仍以全期歷史高點計算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
@@ -2254,7 +2331,7 @@ export default function App() {
                 <EmptyState S={S} />
               ) : (
                 <ResponsiveContainer width="100%" height={260}>
-                  <AreaChart data={drawdownChartData.points} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
+                  <AreaChart data={ddZoomPoints} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
                     <CartesianGrid stroke={S.borderSoft} vertical={false} />
                     <XAxis dataKey="date" tick={{ fontSize: 10, fill: S.textFaint }} minTickGap={40} stroke={S.border} />
                     <YAxis
