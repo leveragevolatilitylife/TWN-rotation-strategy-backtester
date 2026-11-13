@@ -20,6 +20,8 @@ import {
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
+import USDTWD from "./data/usdtwd.json";
+import FED_RATES from "./data/fed_rates.json";
 
 /* ---------- 市場設定 ----------
    資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
@@ -27,7 +29,7 @@ import MARKET_DATA from "./data/market_data.json";
 const MARKET_META = {
   TW: { label: "台股", defaultBull: "00631L", defaultBear: "00635U", defaultSignal: "0050", vixLookback: 1000 },
 };
-const assetShort = (k) => (k === "CASH" ? "現金" : k);
+const assetShort = (k) => (k === "CASH" ? "現金" : k === "USD" ? "美元" : k);
 
 // 手動新增策略使用的色盤：刻意避開下方 5 個預設策略各自固定的顏色，避免圖表撞色
 const RUN_COLORS = ["#f2d675", "#4fd1c5", "#ff9f6b", "#8ee6c5", "#6bc5ff", "#d488c9"];
@@ -452,6 +454,62 @@ function computeICSeries(dataset, finalSignal, bullAsset, bearAsset, icWindow) {
    handleAddRun（手動加入）與預設策略（開機自動載入／按鈕載入）皆呼叫此函式，
    確保計算邏輯（含交易明細、IC序列）完全一致。
    ============================================================ */
+/* ---------- FED 週期防禦（實驗）：升息期且策略持空方標的時，改持美元 ----------
+   制度＝「最近一次調整利率的方向」（升息期／降息期），FOMC 決議日（美東）的下一個台股交易日起生效。
+   美元報酬＝USD/TWD 日報酬 +（聯邦基金利率 − 利差）/252；進出美元各扣一次換匯成本（單邊）。
+   僅作用於權益曲線：appliedAsset／交易明細仍以原本的空方標的記錄，並另外回傳 usdMask（哪些日子實際持有美元）。 */
+const fedUsdCache = new WeakMap();
+function getFedUsdSeries(dataset) {
+  if (fedUsdCache.has(dataset)) return fedUsdCache.get(dataset);
+  const { dates, n } = dataset;
+  const fx = new Array(n).fill(null);
+  let j = 0;
+  let last = USDTWD.close[0];
+  for (let i = 0; i < n; i++) {
+    while (j < USDTWD.dates.length && USDTWD.dates[j] <= dates[i]) {
+      last = USDTWD.close[j];
+      j++;
+    }
+    fx[i] = last;
+  }
+  const ret = fx.map((v, i) => (i === 0 ? 0 : v / fx[i - 1] - 1));
+  const hike = new Array(n).fill(false);
+  const ff = new Array(n).fill(FED_RATES.initialMid / 100);
+  let d = 0;
+  let mid = FED_RATES.initialMid;
+  let regime = false;
+  for (let i = 0; i < n; i++) {
+    while (d < FED_RATES.decisions.length && FED_RATES.decisions[d][0] < dates[i]) {
+      const nm = FED_RATES.decisions[d][1];
+      regime = nm > mid;
+      mid = nm;
+      d++;
+    }
+    hike[i] = regime;
+    ff[i] = mid / 100;
+  }
+  const out = { ret, hike, ff };
+  fedUsdCache.set(dataset, out);
+  return out;
+}
+
+function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
+  const { n } = dataset;
+  const fx = getFedUsdSeries(dataset);
+  const cost = (cfg.fedUsdCost ?? 0.3) / 100;
+  const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
+  const usdMask = new Array(n).fill(false);
+  const eq = new Array(n).fill(1);
+  for (let i = 1; i < n; i++) {
+    usdMask[i] = appliedAsset[i] === bearAsset && fx.hike[i];
+    let r = equity[i] / equity[i - 1] - 1;
+    if (usdMask[i]) r = (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
+    if (usdMask[i] !== usdMask[i - 1]) r -= cost;
+    eq[i] = eq[i - 1] * (1 + r);
+  }
+  return { equity: eq, usdMask };
+}
+
 function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   let sigA = null;
   let sigB = null;
@@ -462,17 +520,25 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   if (cfg.vixEnabled) sigB = computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
   const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
 
-  const { equity, appliedAsset, trades, tradeList } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
+  const bt = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
     commissionRate: cfg.commissionRate,
     taxRate: cfg.taxRate,
   });
+  const { appliedAsset, trades, tradeList } = bt;
+  let equity = bt.equity;
+  let usdMask = null;
+  if (cfg.fedUsdEnabled && dataset.anchor === "0050") {
+    const ov = applyFedUsdOverlay(dataset, bt.equity, appliedAsset, cfg.bearAsset, cfg);
+    equity = ov.equity;
+    usdMask = ov.usdMask;
+  }
   const { icRolling, icExpanding } = computeICSeries(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, cfg.icWindow);
 
   const endIdx = lastAssetEndIdx == null ? dataset.n - 1 : lastAssetEndIdx;
   let lastAsset = null;
   for (let i = endIdx; i >= 0; i--) {
     if (appliedAsset[i]) {
-      lastAsset = appliedAsset[i];
+      lastAsset = usdMask && usdMask[i] ? "USD" : appliedAsset[i];
       break;
     }
   }
@@ -484,6 +550,7 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     config: { ...cfg },
     equity,
     appliedAsset,
+    usdMask,
     trades,
     tradeList,
     icRolling,
@@ -1247,6 +1314,9 @@ export default function App() {
     commissionRate: 0.1425,
     taxRate: 0.1,
     icWindow: 60,
+    fedUsdEnabled: false, // 實驗：升息期且持空方標的時改持美元（僅台股）
+    fedUsdCost: 0.3, // 每次換匯成本（單邊，%）
+    fedUsdSpread: 0.5, // 美元利息 = 聯邦基金利率 − 利差（%）
   });
 
   // 各市場各自一份比較清單；其餘程式碼仍以 runs / setRuns 操作「目前市場」的清單
@@ -1514,7 +1584,7 @@ export default function App() {
         isBench: false,
         // 最新持倉：依「目前所選日期區間的結束日」回頭找最後一個有效持倉（不可使用建立 run 時快取的值）
         lastAsset: (() => {
-          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.appliedAsset[i];
+          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.usdMask && run.usdMask[i] ? "USD" : run.appliedAsset[i];
           return null;
         })(),
         ...stats,
@@ -1983,6 +2053,28 @@ export default function App() {
             </TwoCol>
             <HintText text="輪動當天：舊標的以「前收→當日開盤」計隔夜報酬並於開盤扣賣出成本，新標的於開盤買進扣手續費後，計「開盤→當日收盤」報酬；未輪動的日子維持一般收盤對收盤報酬、不產生成本。" />
 
+            {dataset.anchor === "0050" && (
+              <>
+                <SectionLabel text="FED 週期防禦（實驗）" />
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", marginBottom: 8 }}>
+                  <input className="chk" type="checkbox" checked={!!draft.fedUsdEnabled} onChange={(e) => setDraft((d) => ({ ...d, fedUsdEnabled: e.target.checked }))} />
+                  升息期且持空方標的時，改持美元
+                </label>
+                {draft.fedUsdEnabled && (
+                  <TwoCol>
+                    <div>
+                      <FieldLabel text="每次換匯成本（單邊 %）" />
+                      <input type="number" value={draft.fedUsdCost} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdCost: Number(e.target.value) }))} />
+                    </div>
+                    <div>
+                      <FieldLabel text="美元利息＝聯邦基金利率 − 利差（%）" />
+                      <input type="number" value={draft.fedUsdSpread} min={0} max={5} step={0.1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSpread: Number(e.target.value) }))} />
+                    </div>
+                  </TwoCol>
+                )}
+                <HintText text="升息期＝最近一次 FOMC 調整為升息（決議日次一台股交易日起生效，決議表見 src/data/fed_rates.json，新決議需手動補）；美元報酬＝USD/TWD 日報酬＋聯邦基金利率減利差的利息，進出各扣一次換匯成本。只改變權益曲線與績效：交易明細、IC 分析仍以原空方標的計。歷史回測，樣本只有兩段完整升息期，不構成投資建議。" />
+              </>
+            )}
             <div style={{ marginTop: 14, marginBottom: 18 }}>
               <FieldLabel text="無風險利率（年化 %，供 Sharpe/Sortino 使用）" />
               <input type="number" value={draft.riskFreeRate} step={0.1} onChange={(e) => setDraft((d) => ({ ...d, riskFreeRate: Number(e.target.value) }))} />
