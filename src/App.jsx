@@ -20,6 +20,7 @@ import {
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
+import TW_OSC from "./data/tw_cash_vix_osc.json"; // 研究分支：台指權 Cash VIX Oscillator（對齊 TW 交易日）
 
 /* ---------- 市場設定 ----------
    資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
@@ -85,6 +86,9 @@ function buildDataset(mk) {
 // 模組層級只計算一次（各市場各一份），供元件初始 state（含開機自動載入的預設策略）共用
 const DATASETS = {};
 for (const k of Object.keys(MARKET_DATA)) DATASETS[k] = buildDataset(MARKET_DATA[k]);
+if (DATASETS.TW && TW_OSC.dates.length === DATASETS.TW.dates.length && TW_OSC.dates.every((d, i) => d === DATASETS.TW.dates[i])) {
+  DATASETS.TW.osc = TW_OSC.osc; // null＝尚無資料（2015-01 以前）
+}
 const MARKET_KEYS = Object.keys(DATASETS);
 const INITIAL_DATASET = DATASETS.TW;
 // 各市場「可選擇的最早回測起始日」＝錨點標的（0050）真正開始有行情的那天
@@ -189,6 +193,50 @@ function computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, hi
 function computeVixSignal(rollYield, lookback, mode, highPct, lowPct, extremeLowPct) {
   const sortedWindows = computeRollingSortedWindows(rollYield, lookback);
   return computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, highPct, lowPct, extremeLowPct);
+}
+
+/* ---------- 研究分支：台指權 Cash VIX Oscillator（低值＝壓力） ---------- */
+function firstValidIdx(series) {
+  for (let i = 0; i < series.length; i++) if (series[i] != null && !Number.isNaN(series[i])) return i;
+  return series.length;
+}
+// 依 cfg.vixSource 選用 Roll Yield（預設）或台指權 Osc 當作 VIX 輪動的輸入序列
+function computeVixSignalFor(dataset, cfg) {
+  if (cfg.vixSource === "osc" && dataset.osc) {
+    const raw = dataset.osc;
+    const sig = computeVixSignal(raw.map((v) => (v == null ? 0 : v)), cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
+    const cut = firstValidIdx(raw) + cfg.vixLookback - 1; // 窗口含無資料區間者一律無訊號
+    for (let i = 0; i < Math.min(cut, sig.length); i++) sig[i] = null;
+    return sig;
+  }
+  return computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
+}
+const OSC_PCT_CACHE = new WeakMap();
+function getOscPercentile(dataset, lookback = 1000) {
+  let m = OSC_PCT_CACHE.get(dataset);
+  if (!m) OSC_PCT_CACHE.set(dataset, (m = new Map()));
+  if (m.has(lookback)) return m.get(lookback);
+  const osc = dataset.osc;
+  const out = new Array(osc.length).fill(null);
+  const start = firstValidIdx(osc) + lookback - 1;
+  for (let i = start; i < osc.length; i++) {
+    let c = 0;
+    for (let j = i - lookback + 1; j <= i; j++) if (osc[j] <= osc[i]) c++;
+    out[i] = (c / lookback) * 100;
+  }
+  m.set(lookback, out);
+  return out;
+}
+// 風險閘門（反向版）：Osc 百分位 < 門檻（壓力區）→ 用 OR（Hybrid II）；其餘 → 用 HOLD（Hybrid）
+function composeSignal(dataset, cfg, sigA, sigB) {
+  if (!(cfg.maEnabled && cfg.vixEnabled)) return cfg.maEnabled ? sigA : sigB;
+  if (cfg.gateEnabled && dataset.osc) {
+    const pct = getOscPercentile(dataset);
+    const calm = combineSignals(sigA, sigB, "HOLD");
+    const stress = combineSignals(sigA, sigB, "OR");
+    return calm.map((_, i) => (pct[i] == null || calm[i] == null || stress[i] == null ? null : pct[i] < cfg.gateThreshold ? stress[i] : calm[i]));
+  }
+  return combineSignals(sigA, sigB, cfg.combineMode);
 }
 
 function combineSignals(sigA, sigB, mode) {
@@ -459,8 +507,8 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     const sa = cfg.signalAsset || dataset.anchor;
     sigA = computeMASignal(dataset.prices[sa], dataset.opens[sa] || dataset.prices[sa], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close");
   }
-  if (cfg.vixEnabled) sigB = computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
-  const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
+  if (cfg.vixEnabled) sigB = computeVixSignalFor(dataset, cfg);
+  const finalSignal = composeSignal(dataset, cfg, sigA, sigB);
 
   const { equity, appliedAsset, trades, tradeList } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
     commissionRate: cfg.commissionRate,
@@ -1097,7 +1145,11 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
     return maCache.get(k);
   };
   const getVixSignal = (cfg) => {
-    const k = `${cfg.vixLookback}|${cfg.vixMode}|${cfg.vixHigh}|${cfg.vixLow}|${cfg.vixExtremeLow}`;
+    const k = `${cfg.vixSource || "rollYield"}|${cfg.vixLookback}|${cfg.vixMode}|${cfg.vixHigh}|${cfg.vixLow}|${cfg.vixExtremeLow}`;
+    if (cfg.vixSource === "osc") {
+      if (!vixSignalCache.has(k)) vixSignalCache.set(k, computeVixSignalFor(dataset, cfg));
+      return vixSignalCache.get(k);
+    }
     if (!vixSignalCache.has(k)) {
       if (!vixWindowCache.has(cfg.vixLookback)) {
         vixWindowCache.set(cfg.vixLookback, computeRollingSortedWindows(dataset.rollYield, cfg.vixLookback));
@@ -1115,7 +1167,7 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
     const cfg = { ...baseDraft, ...v };
     const sigA = cfg.maEnabled ? getMASignal(cfg) : null;
     const sigB = cfg.vixEnabled ? getVixSignal(cfg) : null;
-    const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
+    const finalSignal = composeSignal(dataset, cfg, sigA, sigB);
     const { equity } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
       commissionRate: cfg.commissionRate,
       taxRate: cfg.taxRate,
@@ -1241,6 +1293,9 @@ export default function App() {
     vixLow: 1,
     vixExtremeLow: 0.5,
     combineMode: "AND",
+    vixSource: "rollYield", // 研究分支："rollYield"｜"osc"（台指權 Cash VIX Oscillator）
+    gateEnabled: false, // 研究分支：Osc 風險閘門（壓力區用 OR、平時用 HOLD）
+    gateThreshold: 30,
     bullAsset: MARKET_META.TW.defaultBull,
     bearAsset: MARKET_META.TW.defaultBear,
     riskFreeRate: 1.5,
@@ -1881,6 +1936,16 @@ export default function App() {
             />
             {draft.vixEnabled && (
               <div style={{ marginBottom: 18, paddingLeft: 2 }}>
+                {dataset.osc && (
+                  <div style={{ marginBottom: 10 }}>
+                    <FieldLabel text="輸入序列（研究分支）" />
+                    <div style={{ display: "flex", gap: 14, marginTop: 4, flexWrap: "wrap" }}>
+                      <RadioLabel checked={draft.vixSource !== "osc"} onChange={() => setDraft((d) => ({ ...d, vixSource: "rollYield" }))} label="VX30:VIX Roll Yield" />
+                      <RadioLabel checked={draft.vixSource === "osc"} onChange={() => setDraft((d) => ({ ...d, vixSource: "osc" }))} label="台指權 Cash VIX Osc（2015 起）" />
+                    </div>
+                    {draft.vixSource === "osc" && <HintText text="Osc = VIX3M + VIX6M − VIX9D − VIX1M（TXO 自編）；訊號自 2019-02 才有（需滿 1000 日窗口）。" />}
+                  </div>
+                )}
                 <FieldLabel text="滾動視窗（交易日，約 4 年 = 1008）" />
                 <input type="number" value={draft.vixLookback} min={60} max={2500} step={10} onChange={(e) => setDraft((d) => ({ ...d, vixLookback: Number(e.target.value) }))} />
                 <div style={{ marginTop: 10 }}>
@@ -1929,6 +1994,18 @@ export default function App() {
                   <RadioLabel checked={draft.combineMode === "OR"} onChange={() => setDraft((d) => ({ ...d, combineMode: "OR" }))} label="OR（任一多方即多）" />
                   <RadioLabel checked={draft.combineMode === "HOLD"} onChange={() => setDraft((d) => ({ ...d, combineMode: "HOLD" }))} label="訊號一致才切換，分歧則維持前一日訊號（不輪動）" />
                 </div>
+                {dataset.osc && (
+                  <div style={{ marginTop: 6 }}>
+                    <ToggleRow checked={!!draft.gateEnabled} onChange={(v) => setDraft((d) => ({ ...d, gateEnabled: v }))} label="Osc 風險閘門（研究分支，覆蓋上方合併方式）" />
+                    {draft.gateEnabled && (
+                      <>
+                        <FieldLabel text="壓力區門檻：Osc 滾動1000日百分位 <（%）" />
+                        <input type="number" value={draft.gateThreshold} min={1} max={99} step={1} onChange={(e) => setDraft((d) => ({ ...d, gateThreshold: Number(e.target.value) }))} />
+                        <HintText text="規則：Osc 百分位 < 門檻（壓力區）→ OR（任一多方即多，Hybrid II）；其餘 → HOLD（分歧不輪動，Hybrid）。訊號自 2019-02 起；此為看過結果後才測的方向，樣本外證據偏弱，見 research/tw-cash-vix-osc。" />
+                      </>
+                    )}
+                  </div>
+                )}
                 {draft.combineMode === "HOLD" && (
                   <HintText text="規則：均線與VIX訊號相同 → 採用該訊號；兩者不同 → 沿用前一日已解析出的最終訊號，當日不換倉（回測起點若一開始就分歧，預設以空方起始）。" />
                 )}
