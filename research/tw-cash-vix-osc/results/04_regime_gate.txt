@@ -1,0 +1,43 @@
+起點 2019-02-15
+Hybrid(HOLD)   51.1% / Sh 1.40 / MDD -36% / Calmar 1.41 / sw 45
+Hybrid II(OR)  57.4% / Sh 1.40 / MDD -41% / Calmar 1.42 / sw 109
+
+--- 閘門：Osc 百分位 < T（壓力區）→ Hybrid；其餘 → Hybrid II
+T=10 (壓力區占 13%)          48.7% / Sh 1.30 / MDD -37% / Calmar 1.31 / sw 89
+T=20 (壓力區占 27%)          49.5% / Sh 1.32 / MDD -37% / Calmar 1.33 / sw 81
+T=30 (壓力區占 35%)          47.6% / Sh 1.29 / MDD -37% / Calmar 1.27 / sw 75
+T=40 (壓力區占 47%)          46.5% / Sh 1.28 / MDD -44% / Calmar 1.05 / sw 67
+T=50 (壓力區占 55%)          46.9% / Sh 1.29 / MDD -44% / Calmar 1.06 / sw 69
+T=60 (壓力區占 64%)          45.0% / Sh 1.25 / MDD -50% / Calmar 0.90 / sw 71
+T=70 (壓力區占 71%)          45.6% / Sh 1.27 / MDD -45% / Calmar 1.01 / sw 69
+
+--- 反向對照：Osc 百分位 < T → Hybrid II；其餘 → Hybrid
+T=10                     58.8% / Sh 1.47 / MDD -37% / Calmar 1.58 / sw 79
+T=20                     56.9% / Sh 1.43 / MDD -37% / Calmar 1.53 / sw 99
+T=30                     59.0% / Sh 1.46 / MDD -37% / Calmar 1.59 / sw 105
+T=40                     59.7% / Sh 1.46 / MDD -37% / Calmar 1.61 / sw 119
+T=50                     58.6% / Sh 1.44 / MDD -40% / Calmar 1.46 / sw 125
+T=60                     60.1% / Sh 1.46 / MDD -41% / Calmar 1.48 / sw 129
+T=70                     60.1% / Sh 1.46 / MDD -41% / Calmar 1.48 / sw 123
+
+--- 分期 T=30 vs 單一策略
+2019-02-15 ~ 2021-12-31
+  Hybrid   55.6% / Sh 1.64 / MDD -22% / Calmar 2.48 / sw 18
+  HybridII 77.8% / Sh 1.99 / MDD -23% / Calmar 3.38 / sw 42
+  閘門T30  59.2% / Sh 1.70 / MDD -22% / Calmar 2.64 / sw 21
+2022-01-01 ~ 2024-12-31
+  Hybrid   30.7% / Sh 1.07 / MDD -25% / Calmar 1.24 / sw 14
+  HybridII 25.4% / Sh 0.83 / MDD -30% / Calmar 0.84 / sw 48
+  閘門T30  21.8% / Sh 0.76 / MDD -37% / Calmar 0.58 / sw 40
+2025-01-01 ~ 2026-12-31
+  Hybrid   86.8% / Sh 1.62 / MDD -36% / Calmar 2.40 / sw 12
+  HybridII 92.2% / Sh 1.56 / MDD -37% / Calmar 2.48 / sw 18
+  閘門T30  82.2% / Sh 1.56 / MDD -36% / Calmar 2.27 / sw 14
+
+--- Walk-forward 測試期 2021–2026
+Hybrid    47.6% / Sh 1.28 / MDD -36% / Calmar 1.31
+Hybrid II 52.2% / Sh 1.25 / MDD -41% / Calmar 1.29
+WF 閘門   43.2% / Sh 1.16 / MDD -37% / Calmar 1.16 {"2021":"T20","2022":"T20","2023":"T20","2024":"T20","2025":"T20","2026":"T20"}
+固定 T20    43.2% / Sh 1.16 / MDD -37% / Calmar 1.16
+固定 T30    42.8% / Sh 1.15 / MDD -37% / Calmar 1.15
+固定 T50    42.2% / Sh 1.15 / MDD -44% / Calmar 0.96

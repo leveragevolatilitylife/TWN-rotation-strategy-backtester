@@ -1,0 +1,53 @@
+同期起點 2019-02-15
+基準 RY-VIX       46.3% / Sh 1.27 / MDD -43% / Calmar 1.08 / sw 196
+基準 Hybrid HOLD  51.3% / Sh 1.40 / MDD -36% / Calmar 1.42 / sw 44
+基準 Hybrid OR    57.6% / Sh 1.40 / MDD -41% / Calmar 1.42 / sw 108
+
+-- Osc high=10 作濾網
+ RY AND Osc      42.7% / Sh 1.22 / MDD -36% / Calmar 1.18 / sw 209
+ RY HOLD Osc      33.0% / Sh 0.93 / MDD -51% / Calmar 0.65 / sw 65
+ RY OR Osc      36.9% / Sh 0.98 / MDD -56% / Calmar 0.66 / sw 105
+ HybridHOLD AND Osc 44.6% / Sh 1.32 / MDD -29% / Calmar 1.56 / sw 111
+ HybridHOLD HOLD Osc 49.9% / Sh 1.34 / MDD -42% / Calmar 1.20 / sw 31
+ HybridHOLD OR Osc 38.7% / Sh 1.01 / MDD -62% / Calmar 0.62 / sw 63
+
+-- Osc high=15 作濾網
+ RY AND Osc      40.6% / Sh 1.21 / MDD -35% / Calmar 1.16 / sw 227
+ RY HOLD Osc      36.8% / Sh 1.02 / MDD -49% / Calmar 0.75 / sw 75
+ RY OR Osc      39.8% / Sh 1.05 / MDD -56% / Calmar 0.71 / sw 125
+ HybridHOLD AND Osc 43.7% / Sh 1.34 / MDD -25% / Calmar 1.77 / sw 139
+ HybridHOLD HOLD Osc 55.2% / Sh 1.46 / MDD -37% / Calmar 1.51 / sw 33
+ HybridHOLD OR Osc 40.4% / Sh 1.05 / MDD -62% / Calmar 0.66 / sw 75
+
+-- Osc high=20 作濾網
+ RY AND Osc      38.9% / Sh 1.20 / MDD -37% / Calmar 1.06 / sw 236
+ RY HOLD Osc      34.2% / Sh 0.98 / MDD -49% / Calmar 0.69 / sw 85
+ RY OR Osc      39.0% / Sh 1.05 / MDD -49% / Calmar 0.80 / sw 131
+ HybridHOLD AND Osc 40.3% / Sh 1.30 / MDD -29% / Calmar 1.41 / sw 170
+ HybridHOLD HOLD Osc 54.1% / Sh 1.44 / MDD -36% / Calmar 1.49 / sw 33
+ HybridHOLD OR Osc 40.4% / Sh 1.06 / MDD -57% / Calmar 0.71 / sw 71
+
+-- Osc high=28 作濾網
+ RY AND Osc      29.7% / Sh 0.99 / MDD -34% / Calmar 0.88 / sw 248
+ RY HOLD Osc      30.9% / Sh 0.92 / MDD -46% / Calmar 0.67 / sw 95
+ RY OR Osc      36.7% / Sh 1.00 / MDD -49% / Calmar 0.75 / sw 139
+ HybridHOLD AND Osc 31.2% / Sh 1.08 / MDD -29% / Calmar 1.06 / sw 190
+ HybridHOLD HOLD Osc 51.7% / Sh 1.40 / MDD -37% / Calmar 1.41 / sw 35
+ HybridHOLD OR Osc 37.3% / Sh 1.00 / MDD -56% / Calmar 0.66 / sw 79
+
+分期 (RY-VIX | RY HOLD Osc15 | HybridHOLD | HybridHOLD HOLD Osc15)
+2019-02-15 ~ 2021-12-31
+  RY       55.8% / Sh 1.61 / MDD -19% / Calmar 3.00 / sw 70
+  RY+Osc   43.9% / Sh 1.22 / MDD -49% / Calmar 0.90 / sw 27
+  Hyb      55.6% / Sh 1.64 / MDD -22% / Calmar 2.48 / sw 18
+  Hyb+Osc  58.4% / Sh 1.67 / MDD -22% / Calmar 2.61 / sw 15
+2022-01-01 ~ 2024-12-31
+  RY       32.0% / Sh 1.07 / MDD -29% / Calmar 1.10 / sw 77
+  RY+Osc   18.6% / Sh 0.65 / MDD -49% / Calmar 0.38 / sw 26
+  Hyb      30.7% / Sh 1.07 / MDD -25% / Calmar 1.24 / sw 14
+  Hyb+Osc  29.0% / Sh 0.98 / MDD -36% / Calmar 0.82 / sw 8
+2025-01-01 ~ 2026-12-31
+  RY       55.9% / Sh 1.19 / MDD -43% / Calmar 1.30 / sw 49
+  RY+Osc   61.8% / Sh 1.29 / MDD -36% / Calmar 1.71 / sw 22
+  Hyb      86.8% / Sh 1.62 / MDD -36% / Calmar 2.40 / sw 12
+  Hyb+Osc  106.8% / Sh 1.88 / MDD -22% / Calmar 4.76 / sw 10

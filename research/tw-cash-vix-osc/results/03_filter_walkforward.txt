@@ -1,0 +1,20 @@
+
+=== Hybrid HOLD + Osc(HOLD) walk-forward，測試期 2021–2026
+基準 Hybrid         47.6% / Sh 1.28 / MDD -36% / Calmar 1.31
+固定 h15 (in-sample) 51.0% / Sh 1.33 / MDD -37% / Calmar 1.39
+WF 含基準可選       41.4% / Sh 1.13 / MDD -42% / Calmar 0.99 {"2021":"h10","2022":"h10","2023":"base","2024":"base","2025":"base","2026":"base"}
+WF 必選濾網         48.8% / Sh 1.28 / MDD -42% / Calmar 1.17 {"2021":"h10","2022":"h10","2023":"h15","2024":"h20","2025":"h20","2026":"h15"}
+ 固定 h10           43.7% / Sh 1.17 / MDD -42% / Calmar 1.05
+ 固定 h15           51.0% / Sh 1.33 / MDD -37% / Calmar 1.39
+ 固定 h20           49.5% / Sh 1.31 / MDD -36% / Calmar 1.37
+ 固定 h28           48.1% / Sh 1.28 / MDD -37% / Calmar 1.32
+
+=== Hybrid HOLD + Osc(AND) walk-forward，測試期 2021–2026
+基準 Hybrid         47.6% / Sh 1.28 / MDD -36% / Calmar 1.31
+固定 h15 (in-sample) 36.6% / Sh 1.13 / MDD -25% / Calmar 1.48
+WF 含基準可選       41.0% / Sh 1.15 / MDD -36% / Calmar 1.13 {"2021":"h15","2022":"base","2023":"base","2024":"base","2025":"base","2026":"base"}
+WF 必選濾網         33.9% / Sh 1.05 / MDD -28% / Calmar 1.23 {"2021":"h15","2022":"h15","2023":"h15","2024":"h15","2025":"h10","2026":"h10"}
+ 固定 h10           37.7% / Sh 1.13 / MDD -29% / Calmar 1.32
+ 固定 h15           36.6% / Sh 1.13 / MDD -25% / Calmar 1.48
+ 固定 h20           35.1% / Sh 1.13 / MDD -29% / Calmar 1.23
+ 固定 h28           26.4% / Sh 0.92 / MDD -29% / Calmar 0.90
