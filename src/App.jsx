@@ -1290,6 +1290,8 @@ export default function App() {
     { key: "maPeriod", min: 20, max: 120, steps: 6 },
     { key: "vixHigh", min: 15, max: 45, steps: 6 },
   ]);
+  // 訊號合併方式（AND／OR／HOLD）可作為 PBO 網格的類別型參數；全部不勾選＝沿用左側目前的合併方式
+  const [pboModes, setPboModes] = useState({ AND: false, OR: false, HOLD: false });
   const [pboBlocks, setPboBlocks] = useState(8);
   const [pboMaxCombos, setPboMaxCombos] = useState(200);
   const [wfaIsYears, setWfaIsYears] = useState(3);
@@ -1398,6 +1400,14 @@ export default function App() {
       const values = linspace(row.min, row.max, row.steps, meta.isInt);
       paramDefs.push({ key: row.key, label: meta.label, values });
     }
+    const modeList = ["AND", "OR", "HOLD"].filter((m) => pboModes[m]);
+    if (modeList.length > 0) {
+      if (!(draft.maEnabled && draft.vixEnabled)) {
+        setPboError("訊號合併方式只有在「均線」與「VIX」同時啟用時才有意義，請先啟用兩者，或取消勾選合併方式。");
+        return;
+      }
+      paramDefs.push({ key: "combineMode", label: "訊號合併方式", values: modeList });
+    }
     const total = paramDefs.reduce((a, p) => a * p.values.length, 1);
     const hardCap = Math.min(2000, Math.max(4, pboMaxCombos));
     if (total > hardCap) {
@@ -1423,7 +1433,7 @@ export default function App() {
         setPboRunning(false);
       }
     }, 30);
-  }, [draft, pboParams, pboBlocks, pboMaxCombos, wfaIsYears, wfaOsMonths, wfaMode, dataset, rangeIdx]);
+  }, [draft, pboParams, pboModes, pboBlocks, pboMaxCombos, wfaIsYears, wfaOsMonths, wfaMode, dataset, rangeIdx]);
 
   /* ---- 依目前日期範圍，切片＋重新正規化每個 run ＋ benchmark ---- */
   const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, tradeDistribution, icTableRows, statWindow } = useMemo(() => {
@@ -2121,6 +2131,22 @@ export default function App() {
                   </div>
                 );
               })}
+              {draft.maEnabled && draft.vixEnabled && (
+                <div style={{ marginTop: 10, padding: 8, background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4 }}>
+                  <FieldLabel text="訊號合併方式（類別型參數，可複選）" />
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 6 }}>
+                    {[["AND", "AND"], ["OR", "OR"], ["HOLD", "HOLD"]].map(([k, lab]) => (
+                      <label key={k} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: S.textMuted }}>
+                        <input className="chk" type="checkbox" checked={pboModes[k]} onChange={(e) => setPboModes((m) => ({ ...m, [k]: e.target.checked }))} />
+                        {lab}
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: S.textFaint, marginTop: 6, lineHeight: 1.5 }}>
+                    勾選的模式會與上方數值參數做交叉組合，一起進入 CSCV／DSR／前向分析；全部不勾選則沿用左側目前的合併方式（{draft.combineMode}）。
+                  </div>
+                </div>
+              )}
               <button
                 onClick={addPboParam}
                 disabled={pboParams.length >= 6 || pboParams.length >= getAvailableParams(draft).length}
@@ -2185,7 +2211,8 @@ export default function App() {
                 </div>
               </div>
               {(() => {
-                const estN = pboParams.reduce((a, p) => a * Math.max(1, Math.round(p.steps)), 1);
+                const estModes = draft.maEnabled && draft.vixEnabled ? Math.max(1, ["AND", "OR", "HOLD"].filter((m) => pboModes[m]).length) : 1;
+                const estN = pboParams.reduce((a, p) => a * Math.max(1, Math.round(p.steps)), 1) * estModes;
                 const comboMap = { 6: 20, 8: 70, 10: 252, 12: 924 };
                 const estSplits = comboMap[pboBlocks] || 70;
                 const estSeconds = 2.5 + (estN * estSplits) / 46000;
