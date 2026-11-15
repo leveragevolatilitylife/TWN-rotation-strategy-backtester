@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useRef } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -16,7 +16,6 @@ import {
   Legend,
   ReferenceDot,
   ReferenceLine,
-  Brush,
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
@@ -2354,26 +2353,17 @@ export default function App() {
                 </ResponsiveContainer>
               )}
               {chartData.series.length > 0 && (
-                <ResponsiveContainer width="100%" height={54}>
-                  <LineChart data={chartData.points} margin={{ top: 2, right: 16, bottom: 0, left: 58 }}>
-                    <Line type="monotone" dataKey={chartData.series[0].key} stroke={S.textFaint} dot={false} strokeWidth={1} isAnimationActive={false} />
-                    <Brush
-                      dataKey="date"
-                      height={34}
-                      travellerWidth={8}
-                      stroke={S.textFaint}
-                      fill={S.panelAlt}
-                      startIndex={zoomIdx.a}
-                      endIndex={zoomIdx.b}
-                      onChange={(r) => {
-                        if (r && (r.startIndex !== zoomIdx.a || r.endIndex !== zoomIdx.b)) setZoomByIdx(r.startIndex, r.endIndex);
-                      }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
+                <ZoomSlider
+                  S={S}
+                  points={chartData.points}
+                  seriesKey={chartData.series[0].key}
+                  a={zoomIdx.a}
+                  b={zoomIdx.b}
+                  onChange={setZoomByIdx}
+                />
               )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                拖曳下方滑桿兩端或點選快捷鈕可縮放時間段（回撤曲線同步。未勾選「區間起點歸零」時，回撤與整體績效維持全期視角；勾選後，權益曲線、回撤曲線、整體績效與交易統計都以縮放區間重算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
+                拖曳下方滑桿的兩端把手可調整起訖、拖曳中間選取區可平移、點選滑桿空白處可跳到該位置、雙擊可還原全期；也可點選快捷鈕縮放時間段（回撤曲線同步。未勾選「區間起點歸零」時，回撤與整體績效維持全期視角；勾選後，權益曲線、回撤曲線、整體績效與交易統計都以縮放區間重算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
@@ -2916,6 +2906,129 @@ function ToggleRow({ checked, onChange, label }) {
     </label>
   );
 }
+/* 縮放滑桿：取代 Recharts Brush（把手太窄、受控模式拖曳時會卡）。
+   以 Pointer Events 實作，支援滑鼠／觸控：拖兩端把手＝調整起訖、拖中間＝平移、點空白處＝跳至該位置、雙擊＝還原全期。
+   拖曳中先更新本地預覽，再以節流方式通知父層重算，放開時一定送出最終值。 */
+function ZoomSlider({ S, points, seriesKey, a, b, onChange }) {
+  const n = points.length;
+  const trackRef = useRef(null);
+  const dragRef = useRef(null);
+  const lastCommit = useRef(0);
+  const [live, setLive] = useState(null);
+  const win = live || { a, b };
+  const MIN_LEN = Math.min(5, Math.max(1, n - 1));
+
+  const spark = useMemo(() => {
+    if (n < 2) return "";
+    const step = Math.max(1, Math.floor(n / 400));
+    const ys = [];
+    for (let i = 0; i < n; i += step) { const v = points[i][seriesKey]; if (v != null) ys.push([i, v]); }
+    if (ys.length < 2) return "";
+    let lo = Infinity, hi = -Infinity;
+    for (const [, v] of ys) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    const span = hi - lo || 1;
+    return ys.map(([i, v], k) => `${k ? "L" : "M"}${((i / (n - 1)) * 1000).toFixed(1)},${(36 - ((v - lo) / span) * 32).toFixed(1)}`).join(" ");
+  }, [points, seriesKey, n]);
+
+  const idxFromX = (clientX) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientX - r.left) / Math.max(1, r.width)));
+    return Math.round(f * (n - 1));
+  };
+  const commit = (w, force) => {
+    const now = performance.now();
+    if (force || now - lastCommit.current > 70) { lastCommit.current = now; onChange(w.a, w.b); }
+  };
+  const begin = (e, mode) => {
+    e.preventDefault(); e.stopPropagation();
+    trackRef.current.setPointerCapture(e.pointerId);
+    const idx = idxFromX(e.clientX);
+    dragRef.current = { mode, a0: win.a, b0: win.b, grab: idx - win.a };
+    setLive({ a: win.a, b: win.b });
+  };
+  const move = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const idx = idxFromX(e.clientX);
+    let w;
+    if (d.mode === "l") w = { a: Math.max(0, Math.min(idx, d.b0 - MIN_LEN)), b: d.b0 };
+    else if (d.mode === "r") w = { a: d.a0, b: Math.min(n - 1, Math.max(idx, d.a0 + MIN_LEN)) };
+    else {
+      const width = d.b0 - d.a0;
+      const na = Math.max(0, Math.min(n - 1 - width, idx - d.grab));
+      w = { a: na, b: na + width };
+    }
+    d.last = w;
+    setLive(w);
+    commit(w, false);
+  };
+  const end = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    try { trackRef.current.releasePointerCapture(e.pointerId); } catch (_) { /* 已釋放 */ }
+    const w = d.last || { a: d.a0, b: d.b0 };
+    setLive(null);
+    onChange(w.a, w.b);
+  };
+  const trackDown = (e) => {
+    // 點在空白處：把目前選取窗口的中心移到點擊位置，並直接進入平移拖曳
+    const idx = idxFromX(e.clientX);
+    const width = win.b - win.a;
+    const na = Math.max(0, Math.min(n - 1 - width, Math.round(idx - width / 2)));
+    e.preventDefault();
+    trackRef.current.setPointerCapture(e.pointerId);
+    dragRef.current = { mode: "m", a0: na, b0: na + width, grab: Math.round(width / 2), last: { a: na, b: na + width } };
+    setLive({ a: na, b: na + width });
+    commit({ a: na, b: na + width }, true);
+  };
+  if (n < 2) return null;
+  const left = (win.a / (n - 1)) * 100, right = (win.b / (n - 1)) * 100;
+  const full = win.a <= 0 && win.b >= n - 1;
+  const handle = (mode, pos) => (
+    <div
+      onPointerDown={(e) => begin(e, mode)}
+      title={mode === "l" ? "拖曳調整起點" : "拖曳調整終點"}
+      style={{ position: "absolute", top: 0, bottom: 0, left: `${pos}%`, width: 22, marginLeft: -11, cursor: "ew-resize", display: "flex", alignItems: "center", justifyContent: "center", touchAction: "none", zIndex: 2 }}
+    >
+      <div style={{ width: 8, height: 30, borderRadius: 3, background: S.gold, boxShadow: "0 0 0 1px rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 2, height: 14, borderLeft: "1px solid rgba(0,0,0,0.45)", borderRight: "1px solid rgba(0,0,0,0.45)", boxSizing: "border-box" }} />
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ margin: "4px 16px 0 58px" }}>
+      <div
+        ref={trackRef}
+        onPointerDown={trackDown}
+        onPointerMove={move}
+        onPointerUp={end}
+        onPointerCancel={end}
+        onDoubleClick={() => { dragRef.current = null; setLive(null); onChange(0, n - 1); }}
+        style={{ position: "relative", height: 44, background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, cursor: "pointer", touchAction: "none", userSelect: "none" }}
+      >
+        <svg viewBox="0 0 1000 40" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+          <path d={spark} fill="none" stroke={S.textFaint} strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+        </svg>
+        <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: `${left}%`, background: "rgba(0,0,0,0.38)", pointerEvents: "none" }} />
+        <div style={{ position: "absolute", top: 0, bottom: 0, left: `${right}%`, right: 0, background: "rgba(0,0,0,0.38)", pointerEvents: "none" }} />
+        <div
+          onPointerDown={(e) => begin(e, "m")}
+          title="拖曳平移選取區"
+          style={{ position: "absolute", top: 0, bottom: 0, left: `${left}%`, width: `${right - left}%`, border: `1px solid ${S.gold}`, boxSizing: "border-box", cursor: full ? "default" : "grab", touchAction: "none", background: "rgba(255,255,255,0.04)" }}
+        />
+        {handle("l", left)}
+        {handle("r", right)}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: S.textFaint, marginTop: 3 }}>
+        <span>{points[win.a].date}</span>
+        <span>{full ? "全期（拖曳把手縮放，雙擊還原）" : `${win.b - win.a + 1} 個交易日（雙擊還原全期）`}</span>
+        <span>{points[win.b].date}</span>
+      </div>
+    </div>
+  );
+}
+
 function RadioLabel({ checked, onChange, label }) {
   return (
     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: THEME.textMuted }}>
