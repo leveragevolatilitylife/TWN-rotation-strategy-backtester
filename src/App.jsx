@@ -1650,6 +1650,18 @@ export default function App() {
     const startStr = d.toISOString().slice(0, 10);
     setZoom(startStr <= pts[0].date ? null : { s: startStr, e: last });
   };
+  // YTD／MTD：以資料最後一個交易日所在的年／月為準；起點取「上一年底／上月底的最後一個交易日」作為基準日，
+  // 這樣區間內第一個交易日的漲跌也會計入（與一般 YTD、MTD 報酬的算法一致）。
+  const zoomPeriod = (kind) => {
+    const pts = chartData.points;
+    if (!pts.length) return;
+    const last = pts[pts.length - 1].date;
+    const boundary = kind === "YTD" ? `${last.slice(0, 4)}-01-01` : `${last.slice(0, 7)}-01`;
+    let a = -1;
+    for (let i = pts.length - 1; i >= 0; i--) if (pts[i].date < boundary) { a = i; break; }
+    if (a <= 0) return setZoom(null);
+    setZoom({ s: pts[a].date, e: last });
+  };
   const inZoom = (d) => !isZoomed || (d >= zoom.s && d <= zoom.e);
 
   // 權益曲線實際繪製的資料：套用縮放；線性座標轉成累計報酬率(%)，對數座標維持倍數
@@ -2261,8 +2273,9 @@ export default function App() {
             {chartData.series.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11.5 }}>
                 <span style={{ color: S.textMuted }}>縮放：</span>
-                {[["全部", null], ["近1年", 1], ["近3年", 3], ["近5年", 5]].map(([lb, y]) => (
-                  <button key={lb} className="btn" onClick={() => (y == null ? setZoom(null) : zoomLastYears(y))}
+                {[["全部", null], ["MTD", "MTD"], ["YTD", "YTD"], ["近1年", 1], ["近3年", 3], ["近5年", 5]].map(([lb, y]) => (
+                  <button key={lb} className="btn" title={lb === "MTD" ? "本月至今（自上月底最後交易日起）" : lb === "YTD" ? "今年至今（自去年底最後交易日起）" : undefined}
+                    onClick={() => (y == null ? setZoom(null) : typeof y === "string" ? zoomPeriod(y) : zoomLastYears(y))}
                     style={{ padding: "2px 9px", fontSize: 11.5, cursor: "pointer", background: S.panelAlt, color: S.text, border: `1px solid ${S.border}`, borderRadius: 4 }}>
                     {lb}
                   </button>
