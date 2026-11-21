@@ -29,9 +29,12 @@ const MARKET_META = {
 const assetShort = (k) => (k === "CASH" ? "現金" : k);
 
 // 手動新增策略使用的色盤：刻意避開下方 5 個預設策略各自固定的顏色，避免圖表撞色
-const RUN_COLORS = ["#f2d675", "#4fd1c5", "#ff9f6b", "#8ee6c5", "#6bc5ff", "#d488c9"];
-const BENCH_COLORS = { "00631L": "#5c6b78", "0050": "#8b98a5", "00635U": "#7a5c66", SPY: "#8b98a5", SSO: "#5c6b78", GLD: "#7a5c66" };
-const BENCH_PALETTE = ["#6f7f8f", "#8a7a5c", "#5c7a70", "#7a6f8f", "#8f6f6f", "#6f8a8f"];
+// 自訂策略線色：與五組範本策略（藍／洋紅／黃／綠／紅）以及對照組（白／淺青／淺橘…）彼此拉開色相
+const RUN_COLORS = ["#26d0ce", "#ff9f43", "#a78bfa", "#b8f04a", "#ff80ab", "#d6d6d6"];
+// 對照組（Buy & Hold）：亮色＋不同虛線樣式，避免和實線策略混淆
+const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8a", "00713": "#d0b3ff", "00632R": "#ffa3a3", "2546": "#c8ff7a", SPY: "#ffffff", SSO: "#8ae6ff", GLD: "#ffcf8a" };
+const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
+const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
 const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
 
@@ -507,7 +510,7 @@ const PRESETS = [
   {
     id: "ma_rotation",
     name: "MA Rotation (0050 60MA+BIAS)",
-    color: "#5b9bd5",
+    color: "#4c9dff",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -526,7 +529,7 @@ const PRESETS = [
   {
     id: "ma_rotation_ii",
     name: "MA Rotation II (0050 60MA+BIAS)",
-    color: "#c792ea",
+    color: "#ff5fd2",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -545,7 +548,7 @@ const PRESETS = [
   {
     id: "vix_btd",
     name: "VIX Rotation+BTD (R4Y28_4Y.5)",
-    color: "#e0a458",
+    color: "#ffd23f",
     config: {
       ...PRESET_BASE,
       maEnabled: false,
@@ -564,7 +567,7 @@ const PRESETS = [
   {
     id: "hybrid",
     name: "MARS+VRS Hybrid",
-    color: "#3ddc97",
+    color: "#2ee59d",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -583,7 +586,7 @@ const PRESETS = [
   {
     id: "hybrid_ii",
     name: "MARS+VRS Hybrid II",
-    color: "#ff6b6b",
+    color: "#ff5252",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -1564,8 +1567,10 @@ export default function App() {
       icTable.push({ id: run.id, name: run.name, color: run.color, icMean, icStd, ir, icExpFinal });
     }
 
+    let benchSeq = 0;
     for (const assetKey of dataset.assetKeys) {
       if (!isBenchOn(assetKey)) continue;
+      const dashStyle = BENCH_DASHES[benchSeq++ % BENCH_DASHES.length];
       const bh = buyHoldCurve(dataset, assetKey);
       const sliced = sliceAndNormalize(bh, startIdx, endIdx);
       const wBh = wSlice(sliced);
@@ -1576,6 +1581,7 @@ export default function App() {
         name: `Buy & Hold ${assetShort(assetKey)}`,
         color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         dash: true,
+        dashStyle,
         data: sliced,
       });
       ddSeries.push({
@@ -1583,6 +1589,7 @@ export default function App() {
         name: `Buy & Hold ${assetShort(assetKey)}`,
         color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         dash: true,
+        dashStyle,
         data: ddData,
       });
       table.push({
@@ -2328,8 +2335,8 @@ export default function App() {
                         dataKey={s.key}
                         name={s.name}
                         stroke={s.color}
-                        strokeWidth={s.dash ? 1.3 : 1.8}
-                        strokeDasharray={s.dash ? "4 3" : undefined}
+                        strokeWidth={s.dash ? 1.7 : 1.8}
+                        strokeDasharray={s.dash ? s.dashStyle || "6 4" : undefined}
                         dot={false}
                         isAnimationActive={false}
                       />
@@ -2414,8 +2421,8 @@ export default function App() {
                         stroke={s.color}
                         fill={s.color}
                         fillOpacity={0.14}
-                        strokeWidth={s.dash ? 1.1 : 1.5}
-                        strokeDasharray={s.dash ? "4 3" : undefined}
+                        strokeWidth={s.dash ? 1.4 : 1.5}
+                        strokeDasharray={s.dash ? s.dashStyle || "6 4" : undefined}
                         dot={false}
                         isAnimationActive={false}
                       />
