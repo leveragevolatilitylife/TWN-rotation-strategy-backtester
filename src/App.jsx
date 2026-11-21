@@ -36,7 +36,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
+const MAX_RUNS = 11; // 6 個預設策略 + 最多 5 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -188,18 +188,41 @@ function computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, hi
   return sig;
 }
 
+/* 「抄底日」遮罩：RollYield 落在近 lookback 天的極低分位以下（且不屬於高位多方）的日子。
+   僅在進階模式（有極低分位規則）下有意義；簡易模式回傳全 false。 */
+function computeVixBtdMask(rollYield, sortedWindows, lookback, mode, highPct, extremeLowPct) {
+  const n = rollYield.length;
+  const mask = new Array(n).fill(false);
+  if (mode !== "advanced") return mask;
+  for (let i = lookback - 1; i < n; i++) {
+    const w = sortedWindows[i];
+    if (rollYield[i] > percentileLinear(w, highPct)) continue;
+    if (rollYield[i] < percentileLinear(w, extremeLowPct)) mask[i] = true;
+  }
+  return mask;
+}
+
+// 合併方式的實際解析：HOLD_BTD＝HOLD 並啟用抄底特例；btdOverride 旗標可對任一合併方式額外啟用
+function resolveCombine(cfg) {
+  const isHoldBtd = cfg.combineMode === "HOLD_BTD";
+  return { mode: isHoldBtd ? "HOLD" : cfg.combineMode, btd: isHoldBtd || !!cfg.btdOverride };
+}
+
 function computeVixSignal(rollYield, lookback, mode, highPct, lowPct, extremeLowPct) {
   const sortedWindows = computeRollingSortedWindows(rollYield, lookback);
   return computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, highPct, lowPct, extremeLowPct);
 }
 
-function combineSignals(sigA, sigB, mode) {
+/* btdMask（可選）：抄底日強制為多方，並成為 HOLD 規則的「前一日已解析訊號」；其餘日子照原規則。 */
+function combineSignals(sigA, sigB, mode, btdMask) {
   const n = sigA.length;
   const out = new Array(n).fill(null);
   let prevResolved = null;
   for (let i = 0; i < n; i++) {
     if (sigA[i] == null || sigB[i] == null) continue;
-    if (mode === "AND") {
+    if (btdMask && btdMask[i]) {
+      out[i] = "BULL";
+    } else if (mode === "AND") {
       out[i] = sigA[i] === "BULL" && sigB[i] === "BULL" ? "BULL" : "BEAR";
     } else if (mode === "OR") {
       out[i] = sigA[i] === "BULL" || sigB[i] === "BULL" ? "BULL" : "BEAR";
@@ -461,8 +484,14 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     const sa = cfg.signalAsset || dataset.anchor;
     sigA = computeMASignal(dataset.prices[sa], dataset.opens[sa] || dataset.prices[sa], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close");
   }
-  if (cfg.vixEnabled) sigB = computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
-  const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
+  let btdMask = null;
+  const comb = resolveCombine(cfg);
+  if (cfg.vixEnabled) {
+    const windows = computeRollingSortedWindows(dataset.rollYield, cfg.vixLookback);
+    sigB = computeVixSignalFromSorted(dataset.rollYield, windows, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
+    if (comb.btd && cfg.maEnabled) btdMask = computeVixBtdMask(dataset.rollYield, windows, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixExtremeLow);
+  }
+  const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, comb.mode, btdMask) : cfg.maEnabled ? sigA : sigB;
 
   const { equity, appliedAsset, trades, tradeList } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
     commissionRate: cfg.commissionRate,
@@ -600,6 +629,26 @@ const PRESETS = [
       vixLow: 1,
       vixExtremeLow: 0.5,
       combineMode: "OR",
+    },
+  },
+  {
+    id: "hybrid_btd",
+    name: "MARS+VRS Hybrid + BTD特例（實驗）",
+    color: "#ff9f43",
+    config: {
+      ...PRESET_BASE,
+      maEnabled: true,
+      maPeriod: 60,
+      maBias: 20,
+      maPriceBasis: "open",
+      vixEnabled: true,
+      vixLookback: 1000,
+      vixMode: "advanced",
+      vixHigh: 28,
+      vixLow: 1,
+      vixExtremeLow: 0.5,
+      combineMode: "HOLD",
+      btdOverride: true,
     },
   },
 ];
@@ -1113,11 +1162,23 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
     return vixSignalCache.get(k);
   };
 
+  const btdMaskCache = new Map();
+  const getBtdMask = (cfg) => {
+    const k = `${cfg.vixLookback}|${cfg.vixMode}|${cfg.vixHigh}|${cfg.vixExtremeLow}`;
+    if (!btdMaskCache.has(k)) {
+      if (!vixWindowCache.has(cfg.vixLookback)) vixWindowCache.set(cfg.vixLookback, computeRollingSortedWindows(dataset.rollYield, cfg.vixLookback));
+      btdMaskCache.set(k, computeVixBtdMask(dataset.rollYield, vixWindowCache.get(cfg.vixLookback), cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixExtremeLow));
+    }
+    return btdMaskCache.get(k);
+  };
+
   const returnsMatrix = variants.map((v) => {
     const cfg = { ...baseDraft, ...v };
     const sigA = cfg.maEnabled ? getMASignal(cfg) : null;
     const sigB = cfg.vixEnabled ? getVixSignal(cfg) : null;
-    const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
+    const comb = resolveCombine(cfg);
+    const btdMask = comb.btd && cfg.maEnabled && cfg.vixEnabled ? getBtdMask(cfg) : null;
+    const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, comb.mode, btdMask) : cfg.maEnabled ? sigA : sigB;
     const { equity } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
       commissionRate: cfg.commissionRate,
       taxRate: cfg.taxRate,
@@ -1243,6 +1304,7 @@ export default function App() {
     vixLow: 1,
     vixExtremeLow: 0.5,
     combineMode: "AND",
+    btdOverride: false,
     bullAsset: MARKET_META.TW.defaultBull,
     bearAsset: MARKET_META.TW.defaultBear,
     riskFreeRate: 1.5,
@@ -1293,7 +1355,7 @@ export default function App() {
     { key: "vixHigh", min: 15, max: 45, steps: 6 },
   ]);
   // 訊號合併方式（AND／OR／HOLD）可作為 PBO 網格的類別型參數；全部不勾選＝沿用左側目前的合併方式
-  const [pboModes, setPboModes] = useState({ AND: false, OR: false, HOLD: false });
+  const [pboModes, setPboModes] = useState({ AND: false, OR: false, HOLD: false, HOLD_BTD: false });
   const [pboBlocks, setPboBlocks] = useState(8);
   const [pboMaxCombos, setPboMaxCombos] = useState(200);
   const [wfaIsYears, setWfaIsYears] = useState(3);
@@ -1402,7 +1464,7 @@ export default function App() {
       const values = linspace(row.min, row.max, row.steps, meta.isInt);
       paramDefs.push({ key: row.key, label: meta.label, values });
     }
-    const modeList = ["AND", "OR", "HOLD"].filter((m) => pboModes[m]);
+    const modeList = ["AND", "OR", "HOLD", "HOLD_BTD"].filter((m) => pboModes[m]);
     if (modeList.length > 0) {
       if (!(draft.maEnabled && draft.vixEnabled)) {
         setPboError("訊號合併方式只有在「均線」與「VIX」同時啟用時才有意義，請先啟用兩者，或取消勾選合併方式。");
@@ -1957,6 +2019,18 @@ export default function App() {
                   <RadioLabel checked={draft.combineMode === "OR"} onChange={() => setDraft((d) => ({ ...d, combineMode: "OR" }))} label="OR（任一多方即多）" />
                   <RadioLabel checked={draft.combineMode === "HOLD"} onChange={() => setDraft((d) => ({ ...d, combineMode: "HOLD" }))} label="訊號一致才切換，分歧則維持前一日訊號（不輪動）" />
                 </div>
+                {draft.vixMode === "advanced" && (
+                  <>
+                    <ToggleRow
+                      checked={!!draft.btdOverride}
+                      onChange={(v) => setDraft((d) => ({ ...d, btdOverride: v }))}
+                      label="BTD 特例（實驗）：VIX 落在極低分位的抄底日，不受均線影響強制當多方"
+                    />
+                    {draft.btdOverride && (
+                      <HintText text="規則：當日 RollYield 低於極低分位（且非高位多方）→ 最終訊號直接為多方，並成為 HOLD 規則的「前一日訊號」；隔日起照所選合併方式。回測驗證僅針對 HOLD 且極低分位 ≤ 0.5%；放寬分位或延長強制天數在歷史上反而變差。" />
+                    )}
+                  </>
+                )}
                 {draft.combineMode === "HOLD" && (
                   <HintText text="規則：均線與VIX訊號相同 → 採用該訊號；兩者不同 → 沿用前一日已解析出的最終訊號，當日不換倉（回測起點若一開始就分歧，預設以空方起始）。" />
                 )}
@@ -2153,7 +2227,7 @@ export default function App() {
                 <div style={{ marginTop: 10, padding: 8, background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4 }}>
                   <FieldLabel text="訊號合併方式（類別型參數，可複選）" />
                   <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 6 }}>
-                    {[["AND", "AND"], ["OR", "OR"], ["HOLD", "HOLD"]].map(([k, lab]) => (
+                    {[["AND", "AND"], ["OR", "OR"], ["HOLD", "HOLD"], ["HOLD_BTD", "HOLD＋BTD特例"]].map(([k, lab]) => (
                       <label key={k} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: S.textMuted }}>
                         <input className="chk" type="checkbox" checked={pboModes[k]} onChange={(e) => setPboModes((m) => ({ ...m, [k]: e.target.checked }))} />
                         {lab}
@@ -2229,7 +2303,7 @@ export default function App() {
                 </div>
               </div>
               {(() => {
-                const estModes = draft.maEnabled && draft.vixEnabled ? Math.max(1, ["AND", "OR", "HOLD"].filter((m) => pboModes[m]).length) : 1;
+                const estModes = draft.maEnabled && draft.vixEnabled ? Math.max(1, ["AND", "OR", "HOLD", "HOLD_BTD"].filter((m) => pboModes[m]).length) : 1;
                 const estN = pboParams.reduce((a, p) => a * Math.max(1, Math.round(p.steps)), 1) * estModes;
                 const comboMap = { 6: 20, 8: 70, 10: 252, 12: 924 };
                 const estSplits = comboMap[pboBlocks] || 70;
