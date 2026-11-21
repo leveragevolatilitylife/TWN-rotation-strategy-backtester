@@ -36,7 +36,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 11; // 6 個預設策略 + 最多 5 組自訂比較
+const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -610,6 +610,7 @@ const PRESETS = [
       vixLow: 1,
       vixExtremeLow: 0.5,
       combineMode: "HOLD",
+      btdOverride: true, // 2026-11-21 起：BTD 特例併入 Hybrid（VIX 極低分位抄底日強制多方）
     },
   },
   {
@@ -629,26 +630,6 @@ const PRESETS = [
       vixLow: 1,
       vixExtremeLow: 0.5,
       combineMode: "OR",
-    },
-  },
-  {
-    id: "hybrid_btd",
-    name: "MARS+VRS Hybrid + BTD特例（實驗）",
-    color: "#ff9f43",
-    config: {
-      ...PRESET_BASE,
-      maEnabled: true,
-      maPeriod: 60,
-      maBias: 20,
-      maPriceBasis: "open",
-      vixEnabled: true,
-      vixLookback: 1000,
-      vixMode: "advanced",
-      vixHigh: 28,
-      vixLow: 1,
-      vixExtremeLow: 0.5,
-      combineMode: "HOLD",
-      btdOverride: true,
     },
   },
 ];
@@ -2024,7 +2005,7 @@ export default function App() {
                     <ToggleRow
                       checked={!!draft.btdOverride}
                       onChange={(v) => setDraft((d) => ({ ...d, btdOverride: v }))}
-                      label="BTD 特例（實驗）：VIX 落在極低分位的抄底日，不受均線影響強制當多方"
+                      label="BTD 特例：VIX 落在極低分位的抄底日，不受均線影響強制當多方"
                     />
                     {draft.btdOverride && (
                       <HintText text="規則：當日 RollYield 低於極低分位（且非高位多方）→ 最終訊號直接為多方，並成為 HOLD 規則的「前一日訊號」；隔日起照所選合併方式。回測驗證僅針對 HOLD 且極低分位 ≤ 0.5%；放寬分位或延長強制天數在歷史上反而變差。" />
