@@ -1771,6 +1771,9 @@ export default function App() {
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
               {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略" : ""}
             </p>
+            <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
+              <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
+            </div>
             {MARKET_KEYS.length > 1 && (
               <div role="tablist" aria-label="市場" style={{ display: "inline-flex", gap: 0, marginTop: 10, border: `1px solid ${S.border}`, borderRadius: 5, overflow: "hidden" }}>
                 {MARKET_KEYS.map((m) => (
