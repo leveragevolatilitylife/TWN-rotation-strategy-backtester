@@ -39,7 +39,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 10; // 7 個預設策略（含 2 個美元防禦實驗）+ 最多 3 組自訂比較
+const MAX_RUNS = 10; // 8 個預設策略（含 3 個美元防禦實驗）+ 最多 2 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -538,7 +538,71 @@ function getEtf682Series(dataset) {
   return px;
 }
 
+/* ---------- 升息期 00635U 趨勢篩選（實驗）----------
+   升息期且 Hybrid 持空方標的（00635U）時：前一日 00635U 收盤在自己的 N 日均線之上才持 00635U；
+   破線則賣出 00635U，先持台幣現金 wait 天（T+2 交割），之後若仍破線才換成美元（USD/TWD＋利息，換匯單邊成本 fedUsdCost）；
+   轉回 00635U（或回到多方）時換回。非升息期的防禦段維持持 00635U。
+   進出 00635U 計手續費（買）／手續費＋證交稅（賣）。近似：以收盤對收盤計。 */
+function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
+  const { n } = dataset;
+  const fx = getFedUsdSeries(dataset);
+  const G = dataset.prices[bearAsset];
+  const L = Math.max(2, Math.round(cfg.fedGoldMA ?? 60));
+  const comm = (cfg.commissionRate ?? 0.1425) / 100;
+  const tax = (cfg.taxRate ?? 0.1) / 100;
+  const fxc = (cfg.fedUsdCost ?? 0.3) / 100;
+  const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
+  const wait = Math.max(0, Math.round(cfg.fedUsdWait ?? 2));
+  const ma = new Array(n).fill(null);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc += G[i];
+    if (i >= L) acc -= G[i - L];
+    if (i >= L - 1) ma[i] = acc / L;
+  }
+  const usdMask = new Array(n).fill(false);
+  const usdLabel = new Array(n).fill(null);
+  const eq = new Array(n).fill(1);
+  let prev = "gold";
+  let since = 0;
+  for (let i = 1; i < n; i++) {
+    let r = equity[i] / equity[i - 1] - 1;
+    if (appliedAsset[i] !== bearAsset) {
+      prev = "gold";
+      since = 0;
+      eq[i] = eq[i - 1] * (1 + r);
+      continue;
+    }
+    const filterOn = fx.hike[i];
+    const goldOK = !filterOn || (ma[i - 1] != null && G[i - 1] > ma[i - 1]);
+    let h;
+    if (goldOK) {
+      h = "gold";
+      since = 0;
+    } else {
+      since++;
+      h = since > wait ? "usd" : "cash";
+    }
+    if (h === "gold") {
+      if (prev !== "gold") r -= comm + (prev === "usd" ? fxc : 0);
+    } else if (h === "cash") {
+      r = -(prev === "gold" ? comm + tax : prev === "usd" ? fxc : 0);
+    } else {
+      const ru = (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
+      r = ru - (prev === "gold" ? comm + tax + fxc : prev === "cash" ? fxc : 0);
+    }
+    if (h !== "gold") {
+      usdMask[i] = true;
+      usdLabel[i] = h === "usd" ? "USD" : "CASH";
+    }
+    prev = h;
+    eq[i] = eq[i - 1] * (1 + r);
+  }
+  return { equity: eq, usdMask, usdLabel };
+}
+
 function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
+  if (cfg.fedGoldFilter && (cfg.fedUsdAsset ?? "FX") === "FX") return applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg);
   const { n } = dataset;
   const fx = getFedUsdSeries(dataset);
   const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682";
@@ -605,10 +669,12 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   const { appliedAsset, trades, tradeList } = bt;
   let equity = bt.equity;
   let usdMask = null;
+  let usdLabel = null;
   if (cfg.fedUsdEnabled && dataset.anchor === "0050") {
     const ov = applyFedUsdOverlay(dataset, bt.equity, appliedAsset, cfg.bearAsset, cfg);
     equity = ov.equity;
     usdMask = ov.usdMask;
+    usdLabel = ov.usdLabel || null;
   }
   const { icRolling, icExpanding } = computeICSeries(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, cfg.icWindow);
 
@@ -616,7 +682,7 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   let lastAsset = null;
   for (let i = endIdx; i >= 0; i--) {
     if (appliedAsset[i]) {
-      lastAsset = usdMask && usdMask[i] ? ((cfg.fedUsdAsset ?? "FX") === "ETF682" ? ((cfg.fedUsdWeight ?? 100) >= 100 ? "00682U" : "00682U/" + appliedAsset[i]) : (cfg.fedUsdWeight ?? 100) >= 100 ? "USD" : "USD/" + appliedAsset[i]) : appliedAsset[i];
+      lastAsset = usdLabel && usdLabel[i] ? usdLabel[i] : usdMask && usdMask[i] ? ((cfg.fedUsdAsset ?? "FX") === "ETF682" ? ((cfg.fedUsdWeight ?? 100) >= 100 ? "00682U" : "00682U/" + appliedAsset[i]) : (cfg.fedUsdWeight ?? 100) >= 100 ? "USD" : "USD/" + appliedAsset[i]) : appliedAsset[i];
       break;
     }
   }
@@ -629,6 +695,7 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     equity,
     appliedAsset,
     usdMask,
+    usdLabel,
     trades,
     tradeList,
     icRolling,
@@ -765,6 +832,20 @@ const PRESETS = [
       fedUsdWeight: 50,
       fedUsdHikeOnly: true,
       fedUsdAsset: "ETF682",
+    },
+  },
+  {
+    id: "hybrid_goldflt",
+    name: "Hybrid + 升息期00635U 60MA篩選，破線→美元（實驗）",
+    color: "#4dd0e1",
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdAsset: "FX",
+      fedUsdHikeOnly: true,
+      fedUsdWait: 2,
+      fedGoldFilter: true,
+      fedGoldMA: 60,
     },
   },
   {
@@ -1453,6 +1534,8 @@ export default function App() {
     fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
     fedUsdAsset: "FX", // "FX"＝理論美元（USD/TWD＋利息）；"ETF682"＝實際持有 00682U（含手續費、證交稅、流動性滑價）
     fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
+    fedGoldFilter: false, // 升息期 00635U 趨勢篩選：前一日收盤在 N 日均線之上才持 00635U，破線改持現金→美元（需「理論美元」模式）
+    fedGoldMA: 60, // 篩選用均線天數
     fedUsdWait: 0, // 理論美元模式：防禦段前幾天先持台幣現金（T+2 交割＝2），之後若仍持空方才換美元
   });
 
@@ -1731,7 +1814,7 @@ export default function App() {
         isBench: false,
         // 最新持倉：依「目前所選日期區間的結束日」回頭找最後一個有效持倉（不可使用建立 run 時快取的值）
         lastAsset: (() => {
-          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.usdMask && run.usdMask[i] ? "USD" : run.appliedAsset[i];
+          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.usdLabel && run.usdLabel[i] ? run.usdLabel[i] : run.usdMask && run.usdMask[i] ? "USD" : run.appliedAsset[i];
           return null;
         })(),
         ...stats,
@@ -1931,7 +2014,7 @@ export default function App() {
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
-              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋2 組美元防禦實驗" : ""}
+              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋3 組美元防禦實驗" : ""}
             </p>
             <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
               <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
@@ -2252,6 +2335,18 @@ export default function App() {
                         <div>
                           <FieldLabel text="T+2 等待天數（先持台幣現金）" />
                           <input type="number" value={draft.fedUsdWait ?? 0} min={0} max={5} step={1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWait: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", gridColumn: "1 / -1" }}>
+                          <input className="chk" type="checkbox" checked={!!draft.fedGoldFilter} onChange={(e) => setDraft((d) => ({ ...d, fedGoldFilter: e.target.checked }))} />
+                          升息期 00635U 站上均線才持有，破線→現金→美元（忽略下方美元比重）
+                        </label>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && draft.fedGoldFilter && (
+                        <div>
+                          <FieldLabel text="00635U 篩選均線（天）" />
+                          <input type="number" value={draft.fedGoldMA ?? 60} min={5} max={250} step={5} onChange={(e) => setDraft((d) => ({ ...d, fedGoldMA: Number(e.target.value) }))} />
                         </div>
                       )}
                       {draft.fedUsdAsset === "ETF682" && (
