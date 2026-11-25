@@ -38,7 +38,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
+const MAX_RUNS = 10; // 7 個預設策略（含 2 個美元防禦實驗）+ 最多 3 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -523,13 +523,21 @@ function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   const fx = getFedUsdSeries(dataset);
   const cost = (cfg.fedUsdCost ?? 0.3) / 100;
   const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
+  const w = Math.min(1, Math.max(0, (cfg.fedUsdWeight ?? 100) / 100)); // 防禦段中美元的比重（其餘仍持空方標的）
+  const hikeOnly = !!cfg.fedUsdHikeOnly; // true＝僅升息期；false＝所有防禦段
   const usdMask = new Array(n).fill(false);
   const eq = new Array(n).fill(1);
+  let prevShare = 0;
   for (let i = 1; i < n; i++) {
-    usdMask[i] = appliedAsset[i] === bearAsset && fx.hike[i];
+    const share = appliedAsset[i] === bearAsset && (!hikeOnly || fx.hike[i]) ? w : 0;
+    usdMask[i] = share > 0;
     let r = equity[i] / equity[i - 1] - 1;
-    if (usdMask[i]) r = (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
-    if (usdMask[i] !== usdMask[i - 1]) r -= cost;
+    if (share > 0) {
+      const ru = (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
+      r = (1 - share) * r + share * ru;
+    }
+    r -= cost * Math.abs(share - prevShare); // 換匯成本只對「美元部位的變動量」計
+    prevShare = share;
     eq[i] = eq[i - 1] * (1 + r);
   }
   return { equity: eq, usdMask };
@@ -569,7 +577,7 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   let lastAsset = null;
   for (let i = endIdx; i >= 0; i--) {
     if (appliedAsset[i]) {
-      lastAsset = usdMask && usdMask[i] ? "USD" : appliedAsset[i];
+      lastAsset = usdMask && usdMask[i] ? ((cfg.fedUsdWeight ?? 100) >= 100 ? "USD" : "USD/" + appliedAsset[i]) : appliedAsset[i];
       break;
     }
   }
@@ -602,6 +610,22 @@ const PRESET_BASE = {
   taxRate: 0.1,
   icWindow: 60,
 };
+const PRESETS_HYBRID_CFG = {
+  ...PRESET_BASE,
+  maEnabled: true,
+  maPeriod: 60,
+  maBias: 20,
+  maPriceBasis: "open",
+  vixEnabled: true,
+  vixLookback: 1000,
+  vixMode: "advanced",
+  vixHigh: 28,
+  vixLow: 1,
+  vixExtremeLow: 0.5,
+  combineMode: "HOLD",
+  btdOverride: true,
+};
+
 const PRESETS = [
   {
     id: "ma_rotation",
@@ -678,6 +702,28 @@ const PRESETS = [
       vixExtremeLow: 0.5,
       combineMode: "HOLD",
       btdOverride: true, // 2026-11-21 起：BTD 特例併入 Hybrid（VIX 極低分位抄底日強制多方）
+    },
+  },
+  {
+    id: "hybrid_usd",
+    name: "Hybrid + 防禦段全美元（實驗）",
+    color: "#ffd23f",
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdWeight: 100,
+      fedUsdHikeOnly: false,
+    },
+  },
+  {
+    id: "hybrid_usd50",
+    name: "Hybrid + 防禦段美元50%／00635U 50%（實驗）",
+    color: "#b388ff",
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdWeight: 50,
+      fedUsdHikeOnly: false,
     },
   },
   {
@@ -1362,6 +1408,8 @@ export default function App() {
     fedUsdEnabled: false, // 實驗：升息期且持空方標的時改持美元（僅台股）
     fedUsdCost: 0.3, // 每次換匯成本（單邊，%）
     fedUsdSpread: 0.5, // 美元利息 = 聯邦基金利率 − 利差（%）
+    fedUsdWeight: 100, // 防禦段中持美元的比重（%），其餘持空方標的
+    fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
   });
 
   // 各市場各自一份比較清單；其餘程式碼仍以 runs / setRuns 操作「目前市場」的清單
@@ -1839,7 +1887,7 @@ export default function App() {
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
-              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略" : ""}
+              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋2 組美元防禦實驗" : ""}
             </p>
             <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
               <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
@@ -2144,8 +2192,22 @@ export default function App() {
                 <SectionLabel text="FED 週期防禦（實驗）" />
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", marginBottom: 8 }}>
                   <input className="chk" type="checkbox" checked={!!draft.fedUsdEnabled} onChange={(e) => setDraft((d) => ({ ...d, fedUsdEnabled: e.target.checked }))} />
-                  升息期且持空方標的時，改持美元
+                  持空方標的（防禦段）時，改持美元
                 </label>
+                {draft.fedUsdEnabled && (
+                  <>
+                    <TwoCol>
+                      <div>
+                        <FieldLabel text="防禦段中美元比重（%）" />
+                        <input type="number" value={draft.fedUsdWeight ?? 100} min={0} max={100} step={10} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWeight: Number(e.target.value) }))} />
+                      </div>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", alignSelf: "end", paddingBottom: 8 }}>
+                        <input className="chk" type="checkbox" checked={!!draft.fedUsdHikeOnly} onChange={(e) => setDraft((d) => ({ ...d, fedUsdHikeOnly: e.target.checked }))} />
+                        僅升息期才換美元
+                      </label>
+                    </TwoCol>
+                  </>
+                )}
                 {draft.fedUsdEnabled && (
                   <TwoCol>
                     <div>
