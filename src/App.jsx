@@ -21,6 +21,7 @@ import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "
 import MARKET_DATA from "./data/market_data.json";
 import USDTWD from "./data/usdtwd.json";
 import FED_RATES from "./data/fed_rates.json";
+import ETF682 from "./data/etf00682u.json";
 
 /* ---------- 市場設定 ----------
    資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
@@ -518,25 +519,54 @@ function getFedUsdSeries(dataset) {
   return out;
 }
 
+// 00682U（富邦美元指數 ETF）收盤價對齊到回測日期（無資料或上市前＝null）
+const etf682Cache = new WeakMap();
+function getEtf682Series(dataset) {
+  if (etf682Cache.has(dataset)) return etf682Cache.get(dataset);
+  const { dates, n } = dataset;
+  const px = new Array(n).fill(null);
+  let j = 0;
+  let last = null;
+  for (let i = 0; i < n; i++) {
+    while (j < ETF682.dates.length && ETF682.dates[j] <= dates[i]) {
+      last = ETF682.close[j];
+      j++;
+    }
+    px[i] = last;
+  }
+  etf682Cache.set(dataset, px);
+  return px;
+}
+
 function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   const { n } = dataset;
   const fx = getFedUsdSeries(dataset);
+  const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682";
+  const etf = useEtf ? getEtf682Series(dataset) : null;
   const cost = (cfg.fedUsdCost ?? 0.3) / 100;
   const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
-  const w = Math.min(1, Math.max(0, (cfg.fedUsdWeight ?? 100) / 100)); // 防禦段中美元的比重（其餘仍持空方標的）
+  const comm = (cfg.commissionRate ?? 0.1425) / 100;
+  const tax = (cfg.taxRate ?? 0.1) / 100;
+  const slip = (cfg.fedUsdSlip ?? 0.3) / 100; // 00682U 流動性差：單邊額外滑價
+  const w = Math.min(1, Math.max(0, (cfg.fedUsdWeight ?? 100) / 100)); // 防禦段中「美元」的比重（其餘仍持空方標的）
   const hikeOnly = !!cfg.fedUsdHikeOnly; // true＝僅升息期；false＝所有防禦段
   const usdMask = new Array(n).fill(false);
   const eq = new Array(n).fill(1);
   let prevShare = 0;
   for (let i = 1; i < n; i++) {
-    const share = appliedAsset[i] === bearAsset && (!hikeOnly || fx.hike[i]) ? w : 0;
+    const listed = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用
+    const share = appliedAsset[i] === bearAsset && (!hikeOnly || fx.hike[i]) && listed ? w : 0;
     usdMask[i] = share > 0;
     let r = equity[i] / equity[i - 1] - 1;
     if (share > 0) {
-      const ru = (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
+      const ru = useEtf
+        ? etf[i] / etf[i - 1] - 1 // 近似：以收盤對收盤計（進出場日的開盤價效果忽略）
+        : (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
       r = (1 - share) * r + share * ru;
     }
-    r -= cost * Math.abs(share - prevShare); // 換匯成本只對「美元部位的變動量」計
+    const d = share - prevShare;
+    if (useEtf) r -= d > 0 ? d * (comm + slip) : -d * (comm + tax + slip); // 買：手續費＋滑價；賣：手續費＋證交稅＋滑價
+    else r -= cost * Math.abs(d);
     prevShare = share;
     eq[i] = eq[i - 1] * (1 + r);
   }
@@ -577,7 +607,7 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   let lastAsset = null;
   for (let i = endIdx; i >= 0; i--) {
     if (appliedAsset[i]) {
-      lastAsset = usdMask && usdMask[i] ? ((cfg.fedUsdWeight ?? 100) >= 100 ? "USD" : "USD/" + appliedAsset[i]) : appliedAsset[i];
+      lastAsset = usdMask && usdMask[i] ? ((cfg.fedUsdAsset ?? "FX") === "ETF682" ? ((cfg.fedUsdWeight ?? 100) >= 100 ? "00682U" : "00682U/" + appliedAsset[i]) : (cfg.fedUsdWeight ?? 100) >= 100 ? "USD" : "USD/" + appliedAsset[i]) : appliedAsset[i];
       break;
     }
   }
@@ -706,24 +736,26 @@ const PRESETS = [
   },
   {
     id: "hybrid_usd",
-    name: "Hybrid + 防禦段全美元（實驗）",
+    name: "Hybrid + 升息期防禦段全00682U（實驗）",
     color: "#ffd23f",
     config: {
       ...PRESETS_HYBRID_CFG,
       fedUsdEnabled: true,
       fedUsdWeight: 100,
-      fedUsdHikeOnly: false,
+      fedUsdHikeOnly: true,
+      fedUsdAsset: "ETF682",
     },
   },
   {
     id: "hybrid_usd50",
-    name: "Hybrid + 防禦段美元50%／00635U 50%（實驗）",
+    name: "Hybrid + 升息期防禦段00682U 50%／00635U 50%（實驗）",
     color: "#b388ff",
     config: {
       ...PRESETS_HYBRID_CFG,
       fedUsdEnabled: true,
       fedUsdWeight: 50,
-      fedUsdHikeOnly: false,
+      fedUsdHikeOnly: true,
+      fedUsdAsset: "ETF682",
     },
   },
   {
@@ -1410,6 +1442,8 @@ export default function App() {
     fedUsdSpread: 0.5, // 美元利息 = 聯邦基金利率 − 利差（%）
     fedUsdWeight: 100, // 防禦段中持美元的比重（%），其餘持空方標的
     fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
+    fedUsdAsset: "FX", // "FX"＝理論美元（USD/TWD＋利息）；"ETF682"＝實際持有 00682U（含手續費、證交稅、流動性滑價）
+    fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
   });
 
   // 各市場各自一份比較清單；其餘程式碼仍以 runs / setRuns 操作「目前市場」的清單
@@ -2196,6 +2230,21 @@ export default function App() {
                 </label>
                 {draft.fedUsdEnabled && (
                   <>
+                    <TwoCol>
+                      <div>
+                        <FieldLabel text="美元部位標的" />
+                        <select value={draft.fedUsdAsset ?? "FX"} onChange={(e) => setDraft((d) => ({ ...d, fedUsdAsset: e.target.value }))}>
+                          <option value="FX">理論美元（USD/TWD＋利息）</option>
+                          <option value="ETF682">00682U 富邦美元指數 ETF（實際可交易）</option>
+                        </select>
+                      </div>
+                      {draft.fedUsdAsset === "ETF682" && (
+                        <div>
+                          <FieldLabel text="00682U 單邊滑價（%，流動性差）" />
+                          <input type="number" value={draft.fedUsdSlip ?? 0.3} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSlip: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                    </TwoCol>
                     <TwoCol>
                       <div>
                         <FieldLabel text="防禦段中美元比重（%）" />
