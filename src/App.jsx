@@ -552,22 +552,31 @@ function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   const hikeOnly = !!cfg.fedUsdHikeOnly; // true＝僅升息期；false＝所有防禦段
   const usdMask = new Array(n).fill(false);
   const eq = new Array(n).fill(1);
+  const wait = Math.max(0, Math.round(cfg.fedUsdWait ?? 0)); // 賣出多方後的 T+2 交割等待：防禦段前 wait 天，美元部位暫以台幣現金持有
   let prevShare = 0;
+  let prevUsd = 0;
+  let segDay = 0; // 目前連續持空方標的的第幾天
   for (let i = 1; i < n; i++) {
+    segDay = appliedAsset[i] === bearAsset ? segDay + 1 : 0;
     const listed = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用
     const share = appliedAsset[i] === bearAsset && (!hikeOnly || fx.hike[i]) && listed ? w : 0;
     usdMask[i] = share > 0;
     let r = equity[i] / equity[i - 1] - 1;
-    if (share > 0) {
+    const inCash = !useEtf && wait > 0 && share > 0 && segDay <= wait; // 等待交割期間：該比重持台幣現金（報酬 0、尚未換匯）
+    if (inCash) {
+      r = (1 - share) * r - (segDay === 1 ? share * (comm + tax) : 0); // 多方賣出成本仍要付（該比重沒買空方標的）
+    } else if (share > 0) {
       const ru = useEtf
         ? etf[i] / etf[i - 1] - 1 // 近似：以收盤對收盤計（進出場日的開盤價效果忽略）
         : (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
       r = (1 - share) * r + share * ru;
     }
-    const d = share - prevShare;
+    const usdShare = inCash ? 0 : share; // 真正持有美元的比重（換匯成本只對它的變動計）
+    const d = useEtf ? share - prevShare : usdShare - prevUsd;
     if (useEtf) r -= d > 0 ? d * (comm + slip) : -d * (comm + tax + slip); // 買：手續費＋滑價；賣：手續費＋證交稅＋滑價
     else r -= cost * Math.abs(d);
     prevShare = share;
+    prevUsd = usdShare;
     eq[i] = eq[i - 1] * (1 + r);
   }
   return { equity: eq, usdMask };
@@ -1444,6 +1453,7 @@ export default function App() {
     fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
     fedUsdAsset: "FX", // "FX"＝理論美元（USD/TWD＋利息）；"ETF682"＝實際持有 00682U（含手續費、證交稅、流動性滑價）
     fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
+    fedUsdWait: 0, // 理論美元模式：防禦段前幾天先持台幣現金（T+2 交割＝2），之後若仍持空方才換美元
   });
 
   // 各市場各自一份比較清單；其餘程式碼仍以 runs / setRuns 操作「目前市場」的清單
@@ -2238,6 +2248,12 @@ export default function App() {
                           <option value="ETF682">00682U 富邦美元指數 ETF（實際可交易）</option>
                         </select>
                       </div>
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                        <div>
+                          <FieldLabel text="T+2 等待天數（先持台幣現金）" />
+                          <input type="number" value={draft.fedUsdWait ?? 0} min={0} max={5} step={1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWait: Number(e.target.value) }))} />
+                        </div>
+                      )}
                       {draft.fedUsdAsset === "ETF682" && (
                         <div>
                           <FieldLabel text="00682U 單邊滑價（%，流動性差）" />
