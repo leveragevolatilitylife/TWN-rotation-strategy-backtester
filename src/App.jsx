@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useRef } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -16,7 +16,6 @@ import {
   Legend,
   ReferenceDot,
   ReferenceLine,
-  Brush,
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
@@ -32,9 +31,12 @@ const MARKET_META = {
 const assetShort = (k) => (k === "CASH" ? "現金" : k === "USD" ? "美元" : k);
 
 // 手動新增策略使用的色盤：刻意避開下方 5 個預設策略各自固定的顏色，避免圖表撞色
-const RUN_COLORS = ["#f2d675", "#4fd1c5", "#ff9f6b", "#8ee6c5", "#6bc5ff", "#d488c9"];
-const BENCH_COLORS = { "00631L": "#5c6b78", "0050": "#8b98a5", "00635U": "#7a5c66", SPY: "#8b98a5", SSO: "#5c6b78", GLD: "#7a5c66" };
-const BENCH_PALETTE = ["#6f7f8f", "#8a7a5c", "#5c7a70", "#7a6f8f", "#8f6f6f", "#6f8a8f"];
+// 自訂策略線色：與五組範本策略（藍／洋紅／黃／綠／紅）以及對照組（白／淺青／淺橘…）彼此拉開色相
+const RUN_COLORS = ["#26d0ce", "#ff9f43", "#a78bfa", "#b8f04a", "#ff80ab", "#d6d6d6"];
+// 對照組（Buy & Hold）：亮色＋不同虛線樣式，避免和實線策略混淆
+const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8a", "00713": "#d0b3ff", "00632R": "#ffa3a3", "2546": "#c8ff7a", SPY: "#ffffff", SSO: "#8ae6ff", GLD: "#ffcf8a" };
+const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
+const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
 const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
 
@@ -188,18 +190,41 @@ function computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, hi
   return sig;
 }
 
+/* 「抄底日」遮罩：RollYield 落在近 lookback 天的極低分位以下（且不屬於高位多方）的日子。
+   僅在進階模式（有極低分位規則）下有意義；簡易模式回傳全 false。 */
+function computeVixBtdMask(rollYield, sortedWindows, lookback, mode, highPct, extremeLowPct) {
+  const n = rollYield.length;
+  const mask = new Array(n).fill(false);
+  if (mode !== "advanced") return mask;
+  for (let i = lookback - 1; i < n; i++) {
+    const w = sortedWindows[i];
+    if (rollYield[i] > percentileLinear(w, highPct)) continue;
+    if (rollYield[i] < percentileLinear(w, extremeLowPct)) mask[i] = true;
+  }
+  return mask;
+}
+
+// 合併方式的實際解析：HOLD_BTD＝HOLD 並啟用抄底特例；btdOverride 旗標可對任一合併方式額外啟用
+function resolveCombine(cfg) {
+  const isHoldBtd = cfg.combineMode === "HOLD_BTD";
+  return { mode: isHoldBtd ? "HOLD" : cfg.combineMode, btd: isHoldBtd || !!cfg.btdOverride };
+}
+
 function computeVixSignal(rollYield, lookback, mode, highPct, lowPct, extremeLowPct) {
   const sortedWindows = computeRollingSortedWindows(rollYield, lookback);
   return computeVixSignalFromSorted(rollYield, sortedWindows, lookback, mode, highPct, lowPct, extremeLowPct);
 }
 
-function combineSignals(sigA, sigB, mode) {
+/* btdMask（可選）：抄底日強制為多方，並成為 HOLD 規則的「前一日已解析訊號」；其餘日子照原規則。 */
+function combineSignals(sigA, sigB, mode, btdMask) {
   const n = sigA.length;
   const out = new Array(n).fill(null);
   let prevResolved = null;
   for (let i = 0; i < n; i++) {
     if (sigA[i] == null || sigB[i] == null) continue;
-    if (mode === "AND") {
+    if (btdMask && btdMask[i]) {
+      out[i] = "BULL";
+    } else if (mode === "AND") {
       out[i] = sigA[i] === "BULL" && sigB[i] === "BULL" ? "BULL" : "BEAR";
     } else if (mode === "OR") {
       out[i] = sigA[i] === "BULL" || sigB[i] === "BULL" ? "BULL" : "BEAR";
@@ -517,8 +542,14 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     const sa = cfg.signalAsset || dataset.anchor;
     sigA = computeMASignal(dataset.prices[sa], dataset.opens[sa] || dataset.prices[sa], cfg.maPeriod, cfg.maBias, cfg.maPriceBasis || "close");
   }
-  if (cfg.vixEnabled) sigB = computeVixSignal(dataset.rollYield, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
-  const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
+  let btdMask = null;
+  const comb = resolveCombine(cfg);
+  if (cfg.vixEnabled) {
+    const windows = computeRollingSortedWindows(dataset.rollYield, cfg.vixLookback);
+    sigB = computeVixSignalFromSorted(dataset.rollYield, windows, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixLow, cfg.vixExtremeLow);
+    if (comb.btd && cfg.maEnabled) btdMask = computeVixBtdMask(dataset.rollYield, windows, cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixExtremeLow);
+  }
+  const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, comb.mode, btdMask) : cfg.maEnabled ? sigA : sigB;
 
   const bt = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
     commissionRate: cfg.commissionRate,
@@ -575,7 +606,7 @@ const PRESETS = [
   {
     id: "ma_rotation",
     name: "MA Rotation (0050 60MA+BIAS)",
-    color: "#5b9bd5",
+    color: "#4c9dff",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -594,7 +625,7 @@ const PRESETS = [
   {
     id: "ma_rotation_ii",
     name: "MA Rotation II (0050 60MA+BIAS)",
-    color: "#c792ea",
+    color: "#ff5fd2",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -613,7 +644,7 @@ const PRESETS = [
   {
     id: "vix_btd",
     name: "VIX Rotation+BTD (R4Y28_4Y.5)",
-    color: "#e0a458",
+    color: "#ffd23f",
     config: {
       ...PRESET_BASE,
       maEnabled: false,
@@ -632,7 +663,7 @@ const PRESETS = [
   {
     id: "hybrid",
     name: "MARS+VRS Hybrid",
-    color: "#3ddc97",
+    color: "#2ee59d",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -646,12 +677,13 @@ const PRESETS = [
       vixLow: 1,
       vixExtremeLow: 0.5,
       combineMode: "HOLD",
+      btdOverride: true, // 2026-11-21 起：BTD 特例併入 Hybrid（VIX 極低分位抄底日強制多方）
     },
   },
   {
     id: "hybrid_ii",
     name: "MARS+VRS Hybrid II",
-    color: "#ff6b6b",
+    color: "#ff5252",
     config: {
       ...PRESET_BASE,
       maEnabled: true,
@@ -1178,11 +1210,23 @@ function runPBOAnalysis(dataset, baseDraft, paramDefs, S, rangeIdx, wfaCfg) {
     return vixSignalCache.get(k);
   };
 
+  const btdMaskCache = new Map();
+  const getBtdMask = (cfg) => {
+    const k = `${cfg.vixLookback}|${cfg.vixMode}|${cfg.vixHigh}|${cfg.vixExtremeLow}`;
+    if (!btdMaskCache.has(k)) {
+      if (!vixWindowCache.has(cfg.vixLookback)) vixWindowCache.set(cfg.vixLookback, computeRollingSortedWindows(dataset.rollYield, cfg.vixLookback));
+      btdMaskCache.set(k, computeVixBtdMask(dataset.rollYield, vixWindowCache.get(cfg.vixLookback), cfg.vixLookback, cfg.vixMode, cfg.vixHigh, cfg.vixExtremeLow));
+    }
+    return btdMaskCache.get(k);
+  };
+
   const returnsMatrix = variants.map((v) => {
     const cfg = { ...baseDraft, ...v };
     const sigA = cfg.maEnabled ? getMASignal(cfg) : null;
     const sigB = cfg.vixEnabled ? getVixSignal(cfg) : null;
-    const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, cfg.combineMode) : cfg.maEnabled ? sigA : sigB;
+    const comb = resolveCombine(cfg);
+    const btdMask = comb.btd && cfg.maEnabled && cfg.vixEnabled ? getBtdMask(cfg) : null;
+    const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, comb.mode, btdMask) : cfg.maEnabled ? sigA : sigB;
     const { equity } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
       commissionRate: cfg.commissionRate,
       taxRate: cfg.taxRate,
@@ -1308,6 +1352,7 @@ export default function App() {
     vixLow: 1,
     vixExtremeLow: 0.5,
     combineMode: "AND",
+    btdOverride: false,
     bullAsset: MARKET_META.TW.defaultBull,
     bearAsset: MARKET_META.TW.defaultBear,
     riskFreeRate: 1.5,
@@ -1360,6 +1405,8 @@ export default function App() {
     { key: "maPeriod", min: 20, max: 120, steps: 6 },
     { key: "vixHigh", min: 15, max: 45, steps: 6 },
   ]);
+  // 訊號合併方式（AND／OR／HOLD）可作為 PBO 網格的類別型參數；全部不勾選＝沿用左側目前的合併方式
+  const [pboModes, setPboModes] = useState({ AND: false, OR: false, HOLD: false, HOLD_BTD: false });
   const [pboBlocks, setPboBlocks] = useState(8);
   const [pboMaxCombos, setPboMaxCombos] = useState(200);
   const [wfaIsYears, setWfaIsYears] = useState(3);
@@ -1468,6 +1515,14 @@ export default function App() {
       const values = linspace(row.min, row.max, row.steps, meta.isInt);
       paramDefs.push({ key: row.key, label: meta.label, values });
     }
+    const modeList = ["AND", "OR", "HOLD", "HOLD_BTD"].filter((m) => pboModes[m]);
+    if (modeList.length > 0) {
+      if (!(draft.maEnabled && draft.vixEnabled)) {
+        setPboError("訊號合併方式只有在「均線」與「VIX」同時啟用時才有意義，請先啟用兩者，或取消勾選合併方式。");
+        return;
+      }
+      paramDefs.push({ key: "combineMode", label: "訊號合併方式", values: modeList });
+    }
     const total = paramDefs.reduce((a, p) => a * p.values.length, 1);
     const hardCap = Math.min(2000, Math.max(4, pboMaxCombos));
     if (total > hardCap) {
@@ -1493,7 +1548,7 @@ export default function App() {
         setPboRunning(false);
       }
     }, 30);
-  }, [draft, pboParams, pboBlocks, pboMaxCombos, wfaIsYears, wfaOsMonths, wfaMode, dataset, rangeIdx]);
+  }, [draft, pboParams, pboModes, pboBlocks, pboMaxCombos, wfaIsYears, wfaOsMonths, wfaMode, dataset, rangeIdx]);
 
   /* ---- 依目前日期範圍，切片＋重新正規化每個 run ＋ benchmark ---- */
   const { chartData, drawdownChartData, icChartData, tableRows, tradeTableRows, tradeDistribution, icTableRows, statWindow } = useMemo(() => {
@@ -1625,8 +1680,10 @@ export default function App() {
       icTable.push({ id: run.id, name: run.name, color: run.color, icMean, icStd, ir, icExpFinal });
     }
 
+    let benchSeq = 0;
     for (const assetKey of dataset.assetKeys) {
       if (!isBenchOn(assetKey)) continue;
+      const dashStyle = BENCH_DASHES[benchSeq++ % BENCH_DASHES.length];
       const bh = buyHoldCurve(dataset, assetKey);
       const sliced = sliceAndNormalize(bh, startIdx, endIdx);
       const wBh = wSlice(sliced);
@@ -1637,6 +1694,7 @@ export default function App() {
         name: `Buy & Hold ${assetShort(assetKey)}`,
         color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         dash: true,
+        dashStyle,
         data: sliced,
       });
       ddSeries.push({
@@ -1644,6 +1702,7 @@ export default function App() {
         name: `Buy & Hold ${assetShort(assetKey)}`,
         color: benchColor(assetKey, dataset.assetKeys.indexOf(assetKey)),
         dash: true,
+        dashStyle,
         data: ddData,
       });
       table.push({
@@ -1711,6 +1770,18 @@ export default function App() {
     const startStr = d.toISOString().slice(0, 10);
     setZoom(startStr <= pts[0].date ? null : { s: startStr, e: last });
   };
+  // YTD／MTD：以資料最後一個交易日所在的年／月為準；起點取「上一年底／上月底的最後一個交易日」作為基準日，
+  // 這樣區間內第一個交易日的漲跌也會計入（與一般 YTD、MTD 報酬的算法一致）。
+  const zoomPeriod = (kind) => {
+    const pts = chartData.points;
+    if (!pts.length) return;
+    const last = pts[pts.length - 1].date;
+    const boundary = kind === "YTD" ? `${last.slice(0, 4)}-01-01` : `${last.slice(0, 7)}-01`;
+    let a = -1;
+    for (let i = pts.length - 1; i >= 0; i--) if (pts[i].date < boundary) { a = i; break; }
+    if (a <= 0) return setZoom(null);
+    setZoom({ s: pts[a].date, e: last });
+  };
   const inZoom = (d) => !isZoomed || (d >= zoom.s && d <= zoom.e);
 
   // 權益曲線實際繪製的資料：套用縮放；線性座標轉成累計報酬率(%)，對數座標維持倍數
@@ -1770,6 +1841,9 @@ export default function App() {
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
               {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略" : ""}
             </p>
+            <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
+              <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
+            </div>
             {MARKET_KEYS.length > 1 && (
               <div role="tablist" aria-label="市場" style={{ display: "inline-flex", gap: 0, marginTop: 10, border: `1px solid ${S.border}`, borderRadius: 5, overflow: "hidden" }}>
                 {MARKET_KEYS.map((m) => (
@@ -1999,6 +2073,18 @@ export default function App() {
                   <RadioLabel checked={draft.combineMode === "OR"} onChange={() => setDraft((d) => ({ ...d, combineMode: "OR" }))} label="OR（任一多方即多）" />
                   <RadioLabel checked={draft.combineMode === "HOLD"} onChange={() => setDraft((d) => ({ ...d, combineMode: "HOLD" }))} label="訊號一致才切換，分歧則維持前一日訊號（不輪動）" />
                 </div>
+                {draft.vixMode === "advanced" && (
+                  <>
+                    <ToggleRow
+                      checked={!!draft.btdOverride}
+                      onChange={(v) => setDraft((d) => ({ ...d, btdOverride: v }))}
+                      label="BTD 特例：VIX 落在極低分位的抄底日，不受均線影響強制當多方"
+                    />
+                    {draft.btdOverride && (
+                      <HintText text="規則：當日 RollYield 低於極低分位（且非高位多方）→ 最終訊號直接為多方，並成為 HOLD 規則的「前一日訊號」；隔日起照所選合併方式。回測驗證僅針對 HOLD 且極低分位 ≤ 0.5%；放寬分位或延長強制天數在歷史上反而變差。" />
+                    )}
+                  </>
+                )}
                 {draft.combineMode === "HOLD" && (
                   <HintText text="規則：均線與VIX訊號相同 → 採用該訊號；兩者不同 → 沿用前一日已解析出的最終訊號，當日不換倉（回測起點若一開始就分歧，預設以空方起始）。" />
                 )}
@@ -2213,6 +2299,22 @@ export default function App() {
                   </div>
                 );
               })}
+              {draft.maEnabled && draft.vixEnabled && (
+                <div style={{ marginTop: 10, padding: 8, background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4 }}>
+                  <FieldLabel text="訊號合併方式（類別型參數，可複選）" />
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 6 }}>
+                    {[["AND", "AND"], ["OR", "OR"], ["HOLD", "HOLD"], ["HOLD_BTD", "HOLD＋BTD特例"]].map(([k, lab]) => (
+                      <label key={k} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: S.textMuted }}>
+                        <input className="chk" type="checkbox" checked={pboModes[k]} onChange={(e) => setPboModes((m) => ({ ...m, [k]: e.target.checked }))} />
+                        {lab}
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: S.textFaint, marginTop: 6, lineHeight: 1.5 }}>
+                    勾選的模式會與上方數值參數做交叉組合，一起進入 CSCV／DSR／前向分析；全部不勾選則沿用左側目前的合併方式（{draft.combineMode}）。
+                  </div>
+                </div>
+              )}
               <button
                 onClick={addPboParam}
                 disabled={pboParams.length >= 6 || pboParams.length >= getAvailableParams(draft).length}
@@ -2277,7 +2379,8 @@ export default function App() {
                 </div>
               </div>
               {(() => {
-                const estN = pboParams.reduce((a, p) => a * Math.max(1, Math.round(p.steps)), 1);
+                const estModes = draft.maEnabled && draft.vixEnabled ? Math.max(1, ["AND", "OR", "HOLD", "HOLD_BTD"].filter((m) => pboModes[m]).length) : 1;
+                const estN = pboParams.reduce((a, p) => a * Math.max(1, Math.round(p.steps)), 1) * estModes;
                 const comboMap = { 6: 20, 8: 70, 10: 252, 12: 924 };
                 const estSplits = comboMap[pboBlocks] || 70;
                 const estSeconds = 2.5 + (estN * estSplits) / 46000;
@@ -2327,8 +2430,9 @@ export default function App() {
             {chartData.series.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11.5 }}>
                 <span style={{ color: S.textMuted }}>縮放：</span>
-                {[["全部", null], ["近1年", 1], ["近3年", 3], ["近5年", 5]].map(([lb, y]) => (
-                  <button key={lb} className="btn" onClick={() => (y == null ? setZoom(null) : zoomLastYears(y))}
+                {[["全部", null], ["MTD", "MTD"], ["YTD", "YTD"], ["近1年", 1], ["近3年", 3], ["近5年", 5]].map(([lb, y]) => (
+                  <button key={lb} className="btn" title={lb === "MTD" ? "本月至今（自上月底最後交易日起）" : lb === "YTD" ? "今年至今（自去年底最後交易日起）" : undefined}
+                    onClick={() => (y == null ? setZoom(null) : typeof y === "string" ? zoomPeriod(y) : zoomLastYears(y))}
                     style={{ padding: "2px 9px", fontSize: 11.5, cursor: "pointer", background: S.panelAlt, color: S.text, border: `1px solid ${S.border}`, borderRadius: 4 }}>
                     {lb}
                   </button>
@@ -2381,8 +2485,8 @@ export default function App() {
                         dataKey={s.key}
                         name={s.name}
                         stroke={s.color}
-                        strokeWidth={s.dash ? 1.3 : 1.8}
-                        strokeDasharray={s.dash ? "4 3" : undefined}
+                        strokeWidth={s.dash ? 1.7 : 1.8}
+                        strokeDasharray={s.dash ? s.dashStyle || "6 4" : undefined}
                         dot={false}
                         isAnimationActive={false}
                       />
@@ -2419,26 +2523,17 @@ export default function App() {
                 </ResponsiveContainer>
               )}
               {chartData.series.length > 0 && (
-                <ResponsiveContainer width="100%" height={54}>
-                  <LineChart data={chartData.points} margin={{ top: 2, right: 16, bottom: 0, left: 58 }}>
-                    <Line type="monotone" dataKey={chartData.series[0].key} stroke={S.textFaint} dot={false} strokeWidth={1} isAnimationActive={false} />
-                    <Brush
-                      dataKey="date"
-                      height={34}
-                      travellerWidth={8}
-                      stroke={S.textFaint}
-                      fill={S.panelAlt}
-                      startIndex={zoomIdx.a}
-                      endIndex={zoomIdx.b}
-                      onChange={(r) => {
-                        if (r && (r.startIndex !== zoomIdx.a || r.endIndex !== zoomIdx.b)) setZoomByIdx(r.startIndex, r.endIndex);
-                      }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
+                <ZoomSlider
+                  S={S}
+                  points={chartData.points}
+                  seriesKey={chartData.series[0].key}
+                  a={zoomIdx.a}
+                  b={zoomIdx.b}
+                  onChange={setZoomByIdx}
+                />
               )}
               <div style={{ fontSize: 10.5, color: S.textFaint, padding: "4px 6px 8px", lineHeight: 1.6 }}>
-                拖曳下方滑桿兩端或點選快捷鈕可縮放時間段（回撤曲線同步。未勾選「區間起點歸零」時，回撤與整體績效維持全期視角；勾選後，權益曲線、回撤曲線、整體績效與交易統計都以縮放區間重算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
+                拖曳下方滑桿的兩端把手可調整起訖、拖曳中間選取區可平移、點選滑桿空白處可跳到該位置、雙擊可還原全期；也可點選快捷鈕縮放時間段（回撤曲線同步。未勾選「區間起點歸零」時，回撤與整體績效維持全期視角；勾選後，權益曲線、回撤曲線、整體績效與交易統計都以縮放區間重算）。滑鼠移到策略曲線上時浮現換倉標記：<span style={{ color: S.teal }}>▲ 綠色朝上＝由空方標的輪動至多方標的（如 00635U → 00631L）</span>、<span style={{ color: S.rose }}>▼ 紅色朝下＝由多方標的輪動至空方標的（如 00631L → 00635U）</span>（標記於換倉當日的累計報酬率位置；Buy &amp; Hold 對照組無換倉標記）。
               </div>
             </div>
 
@@ -2476,8 +2571,8 @@ export default function App() {
                         stroke={s.color}
                         fill={s.color}
                         fillOpacity={0.14}
-                        strokeWidth={s.dash ? 1.1 : 1.5}
-                        strokeDasharray={s.dash ? "4 3" : undefined}
+                        strokeWidth={s.dash ? 1.4 : 1.5}
+                        strokeDasharray={s.dash ? s.dashStyle || "6 4" : undefined}
                         dot={false}
                         isAnimationActive={false}
                       />
@@ -2981,6 +3076,129 @@ function ToggleRow({ checked, onChange, label }) {
     </label>
   );
 }
+/* 縮放滑桿：取代 Recharts Brush（把手太窄、受控模式拖曳時會卡）。
+   以 Pointer Events 實作，支援滑鼠／觸控：拖兩端把手＝調整起訖、拖中間＝平移、點空白處＝跳至該位置、雙擊＝還原全期。
+   拖曳中先更新本地預覽，再以節流方式通知父層重算，放開時一定送出最終值。 */
+function ZoomSlider({ S, points, seriesKey, a, b, onChange }) {
+  const n = points.length;
+  const trackRef = useRef(null);
+  const dragRef = useRef(null);
+  const lastCommit = useRef(0);
+  const [live, setLive] = useState(null);
+  const win = live || { a, b };
+  const MIN_LEN = Math.min(5, Math.max(1, n - 1));
+
+  const spark = useMemo(() => {
+    if (n < 2) return "";
+    const step = Math.max(1, Math.floor(n / 400));
+    const ys = [];
+    for (let i = 0; i < n; i += step) { const v = points[i][seriesKey]; if (v != null) ys.push([i, v]); }
+    if (ys.length < 2) return "";
+    let lo = Infinity, hi = -Infinity;
+    for (const [, v] of ys) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    const span = hi - lo || 1;
+    return ys.map(([i, v], k) => `${k ? "L" : "M"}${((i / (n - 1)) * 1000).toFixed(1)},${(36 - ((v - lo) / span) * 32).toFixed(1)}`).join(" ");
+  }, [points, seriesKey, n]);
+
+  const idxFromX = (clientX) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientX - r.left) / Math.max(1, r.width)));
+    return Math.round(f * (n - 1));
+  };
+  const commit = (w, force) => {
+    const now = performance.now();
+    if (force || now - lastCommit.current > 70) { lastCommit.current = now; onChange(w.a, w.b); }
+  };
+  const begin = (e, mode) => {
+    e.preventDefault(); e.stopPropagation();
+    trackRef.current.setPointerCapture(e.pointerId);
+    const idx = idxFromX(e.clientX);
+    dragRef.current = { mode, a0: win.a, b0: win.b, grab: idx - win.a };
+    setLive({ a: win.a, b: win.b });
+  };
+  const move = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const idx = idxFromX(e.clientX);
+    let w;
+    if (d.mode === "l") w = { a: Math.max(0, Math.min(idx, d.b0 - MIN_LEN)), b: d.b0 };
+    else if (d.mode === "r") w = { a: d.a0, b: Math.min(n - 1, Math.max(idx, d.a0 + MIN_LEN)) };
+    else {
+      const width = d.b0 - d.a0;
+      const na = Math.max(0, Math.min(n - 1 - width, idx - d.grab));
+      w = { a: na, b: na + width };
+    }
+    d.last = w;
+    setLive(w);
+    commit(w, false);
+  };
+  const end = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    try { trackRef.current.releasePointerCapture(e.pointerId); } catch (_) { /* 已釋放 */ }
+    const w = d.last || { a: d.a0, b: d.b0 };
+    setLive(null);
+    onChange(w.a, w.b);
+  };
+  const trackDown = (e) => {
+    // 點在空白處：把目前選取窗口的中心移到點擊位置，並直接進入平移拖曳
+    const idx = idxFromX(e.clientX);
+    const width = win.b - win.a;
+    const na = Math.max(0, Math.min(n - 1 - width, Math.round(idx - width / 2)));
+    e.preventDefault();
+    trackRef.current.setPointerCapture(e.pointerId);
+    dragRef.current = { mode: "m", a0: na, b0: na + width, grab: Math.round(width / 2), last: { a: na, b: na + width } };
+    setLive({ a: na, b: na + width });
+    commit({ a: na, b: na + width }, true);
+  };
+  if (n < 2) return null;
+  const left = (win.a / (n - 1)) * 100, right = (win.b / (n - 1)) * 100;
+  const full = win.a <= 0 && win.b >= n - 1;
+  const handle = (mode, pos) => (
+    <div
+      onPointerDown={(e) => begin(e, mode)}
+      title={mode === "l" ? "拖曳調整起點" : "拖曳調整終點"}
+      style={{ position: "absolute", top: 0, bottom: 0, left: `${pos}%`, width: 22, marginLeft: -11, cursor: "ew-resize", display: "flex", alignItems: "center", justifyContent: "center", touchAction: "none", zIndex: 2 }}
+    >
+      <div style={{ width: 8, height: 30, borderRadius: 3, background: S.gold, boxShadow: "0 0 0 1px rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 2, height: 14, borderLeft: "1px solid rgba(0,0,0,0.45)", borderRight: "1px solid rgba(0,0,0,0.45)", boxSizing: "border-box" }} />
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ margin: "4px 16px 0 58px" }}>
+      <div
+        ref={trackRef}
+        onPointerDown={trackDown}
+        onPointerMove={move}
+        onPointerUp={end}
+        onPointerCancel={end}
+        onDoubleClick={() => { dragRef.current = null; setLive(null); onChange(0, n - 1); }}
+        style={{ position: "relative", height: 44, background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, cursor: "pointer", touchAction: "none", userSelect: "none" }}
+      >
+        <svg viewBox="0 0 1000 40" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+          <path d={spark} fill="none" stroke={S.textFaint} strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+        </svg>
+        <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: `${left}%`, background: "rgba(0,0,0,0.38)", pointerEvents: "none" }} />
+        <div style={{ position: "absolute", top: 0, bottom: 0, left: `${right}%`, right: 0, background: "rgba(0,0,0,0.38)", pointerEvents: "none" }} />
+        <div
+          onPointerDown={(e) => begin(e, "m")}
+          title="拖曳平移選取區"
+          style={{ position: "absolute", top: 0, bottom: 0, left: `${left}%`, width: `${right - left}%`, border: `1px solid ${S.gold}`, boxSizing: "border-box", cursor: full ? "default" : "grab", touchAction: "none", background: "rgba(255,255,255,0.04)" }}
+        />
+        {handle("l", left)}
+        {handle("r", right)}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: S.textFaint, marginTop: 3 }}>
+        <span>{points[win.a].date}</span>
+        <span>{full ? "全期（拖曳把手縮放，雙擊還原）" : `${win.b - win.a + 1} 個交易日（雙擊還原全期）`}</span>
+        <span>{points[win.b].date}</span>
+      </div>
+    </div>
+  );
+}
+
 function RadioLabel({ checked, onChange, label }) {
   return (
     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: THEME.textMuted }}>
