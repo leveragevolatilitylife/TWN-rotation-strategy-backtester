@@ -641,7 +641,7 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
 function getHikeFlags(fx, cfg) {
   if (!cfg.fedCpiFilter) return fx.hike;
   const th = cfg.fedCpiMin ?? 3;
-  const series = fx.infl[cfg.fedInflSrc ?? "CPI"] || fx.infl.CPI;
+  const series = fx.infl[cfg.fedInflSrc ?? "PCE"] || fx.infl.PCE;
   return fx.hike.map((h, i) => h && series[i] != null && series[i] >= th);
 }
 
@@ -908,8 +908,8 @@ const PRESETS = [
     },
   },
   {
-    id: "hybrid_cpi682",
-    name: "Hybrid + 升息期且CPI≥3%：60MA篩選，破線→00682U（實驗）",
+    id: "hybrid_infl682",
+    name: "Hybrid + 升息期且PCE≥3%：60MA篩選，破線→00682U（實驗）",
     color: "#ff8a65",
     config: {
       ...PRESETS_HYBRID_CFG,
@@ -920,12 +920,13 @@ const PRESETS = [
       fedGoldFilter: true,
       fedGoldMA: 60,
       fedCpiFilter: true,
+      fedInflSrc: "PCE",
       fedCpiMin: 3,
     },
   },
   {
-    id: "hybrid_cpifx",
-    name: "Hybrid + 升息期且CPI≥3%：60MA篩選，破線→美元（實驗）",
+    id: "hybrid_inflfx",
+    name: "Hybrid + 升息期且PCE≥3%：60MA篩選，破線→美元（實驗）",
     color: "#f48fb1",
     config: {
       ...PRESETS_HYBRID_CFG,
@@ -936,6 +937,7 @@ const PRESETS = [
       fedGoldFilter: true,
       fedGoldMA: 60,
       fedCpiFilter: true,
+      fedInflSrc: "PCE",
       fedCpiMin: 3,
     },
   },
@@ -1625,9 +1627,9 @@ export default function App() {
     fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
     fedUsdAsset: "FX", // "FX"＝理論美元（USD/TWD＋利息）；"ETF682"＝實際持有 00682U（含手續費、證交稅、流動性滑價）
     fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
-    fedCpiFilter: false, // 升息期另需美國 CPI 年增率 ≥ 門檻才啟用美元防禦
+    fedCpiFilter: false, // 升息期另需美國通膨年增率 ≥ 門檻才啟用美元防禦
     fedCpiMin: 3,
-    fedInflSrc: "CPI", // 通膨指標：CPI｜PCE｜CORE_PCE
+    fedInflSrc: "PCE", // 通膨指標：PCE（預設，Fed 目標所用）｜CPI｜CORE_PCE
     fedGoldFilter: false, // 升息期 00635U 趨勢篩選：前一日收盤在 N 日均線之上才持 00635U，破線改持現金→美元（需「理論美元」模式）
     fedGoldMA: 60, // 篩選用均線天數
     fedUsdWait: 0, // 理論美元模式：防禦段前幾天先持台幣現金（T+2 交割＝2），之後若仍持空方才換美元
@@ -2429,9 +2431,9 @@ export default function App() {
                       {draft.fedCpiFilter && (
                         <div>
                           <FieldLabel text="通膨指標" />
-                          <select value={draft.fedInflSrc ?? "CPI"} onChange={(e) => setDraft((d) => ({ ...d, fedInflSrc: e.target.value }))}>
-                            <option value="CPI">CPI</option>
+                          <select value={draft.fedInflSrc ?? "PCE"} onChange={(e) => setDraft((d) => ({ ...d, fedInflSrc: e.target.value }))}>
                             <option value="PCE">PCE</option>
+                            <option value="CPI">CPI</option>
                             <option value="CORE_PCE">核心 PCE</option>
                           </select>
                         </div>
