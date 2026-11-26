@@ -2409,76 +2409,60 @@ export default function App() {
                 </label>
                 {draft.fedUsdEnabled && (
                   <>
+                    <FieldLabel text="美元部位標的" />
+                    <select style={{ marginBottom: 8 }} value={draft.fedUsdAsset ?? "FX"} onChange={(e) => setDraft((d) => ({ ...d, fedUsdAsset: e.target.value }))}>
+                      <option value="FX">理論美元（USD/TWD＋利息）</option>
+                      <option value="ETF682">00682U 富邦美元指數 ETF</option>
+                    </select>
+                    <ToggleRow checked={!!draft.fedUsdHikeOnly} onChange={(v) => setDraft((d) => ({ ...d, fedUsdHikeOnly: v }))} label="僅升息期才換美元" />
+                    <ToggleRow checked={!!draft.fedCpiFilter} onChange={(v) => setDraft((d) => ({ ...d, fedCpiFilter: v }))} label="升息期須 CPI 年增率達門檻" />
+                    <ToggleRow checked={!!draft.fedGoldFilter} onChange={(v) => setDraft((d) => ({ ...d, fedGoldFilter: v }))} label="00635U 跌破均線→改持美元" />
                     <TwoCol>
-                      <div>
-                        <FieldLabel text="美元部位標的" />
-                        <select value={draft.fedUsdAsset ?? "FX"} onChange={(e) => setDraft((d) => ({ ...d, fedUsdAsset: e.target.value }))}>
-                          <option value="FX">理論美元（USD/TWD＋利息）</option>
-                          <option value="ETF682">00682U 富邦美元指數 ETF（實際可交易）</option>
-                        </select>
-                      </div>
-                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
-                        <div>
-                          <FieldLabel text="T+2 等待天數（先持台幣現金）" />
-                          <input type="number" value={draft.fedUsdWait ?? 0} min={0} max={5} step={1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWait: Number(e.target.value) }))} />
-                        </div>
-                      )}
-                      {(
-                        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", gridColumn: "1 / -1" }}>
-                          <input className="chk" type="checkbox" checked={!!draft.fedGoldFilter} onChange={(e) => setDraft((d) => ({ ...d, fedGoldFilter: e.target.checked }))} />
-                          升息期 00635U 站上均線才持有，破線→美元（理論美元：先現金再換匯；00682U：直接換）（忽略下方比重）
-                        </label>
-                      )}
-                      {draft.fedGoldFilter && (
-                        <div>
-                          <FieldLabel text="00635U 篩選均線（天）" />
-                          <input type="number" value={draft.fedGoldMA ?? 60} min={5} max={250} step={5} onChange={(e) => setDraft((d) => ({ ...d, fedGoldMA: Number(e.target.value) }))} />
-                        </div>
-                      )}
-                      {draft.fedUsdAsset === "ETF682" && (
-                        <div>
-                          <FieldLabel text="00682U 單邊滑價（%，流動性差）" />
-                          <input type="number" value={draft.fedUsdSlip ?? 0.3} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSlip: Number(e.target.value) }))} />
-                        </div>
-                      )}
-                    </TwoCol>
-                    <TwoCol>
-                      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", alignSelf: "end", paddingBottom: 8 }}>
-                        <input className="chk" type="checkbox" checked={!!draft.fedCpiFilter} onChange={(e) => setDraft((d) => ({ ...d, fedCpiFilter: e.target.checked }))} />
-                        另需美國 CPI 年增率達門檻才算升息期防禦
-                      </label>
                       {draft.fedCpiFilter && (
                         <div>
-                          <FieldLabel text="CPI 年增率門檻（%）" />
+                          <FieldLabel text="CPI 門檻（%）" />
                           <input type="number" value={draft.fedCpiMin ?? 3} min={0} max={10} step={0.5} onChange={(e) => setDraft((d) => ({ ...d, fedCpiMin: Number(e.target.value) }))} />
                         </div>
                       )}
+                      {draft.fedGoldFilter && (
+                        <div>
+                          <FieldLabel text="均線（天）" />
+                          <input type="number" value={draft.fedGoldMA ?? 60} min={5} max={250} step={5} onChange={(e) => setDraft((d) => ({ ...d, fedGoldMA: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {!draft.fedGoldFilter && (
+                        <div>
+                          <FieldLabel text="美元比重（%）" />
+                          <input type="number" value={draft.fedUsdWeight ?? 100} min={0} max={100} step={10} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWeight: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" ? (
+                        <div>
+                          <FieldLabel text="T+2 現金等待（天）" />
+                          <input type="number" value={draft.fedUsdWait ?? 0} min={0} max={5} step={1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWait: Number(e.target.value) }))} />
+                        </div>
+                      ) : (
+                        <div>
+                          <FieldLabel text="單邊滑價（%）" />
+                          <input type="number" value={draft.fedUsdSlip ?? 0.3} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSlip: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                        <div>
+                          <FieldLabel text="換匯成本（單邊 %）" />
+                          <input type="number" value={draft.fedUsdCost} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdCost: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                        <div>
+                          <FieldLabel text="美元利差（%）" />
+                          <input type="number" value={draft.fedUsdSpread} min={0} max={5} step={0.1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSpread: Number(e.target.value) }))} />
+                        </div>
+                      )}
                     </TwoCol>
-                    <TwoCol>
-                      <div>
-                        <FieldLabel text="防禦段中美元比重（%）" />
-                        <input type="number" value={draft.fedUsdWeight ?? 100} min={0} max={100} step={10} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWeight: Number(e.target.value) }))} />
-                      </div>
-                      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", alignSelf: "end", paddingBottom: 8 }}>
-                        <input className="chk" type="checkbox" checked={!!draft.fedUsdHikeOnly} onChange={(e) => setDraft((d) => ({ ...d, fedUsdHikeOnly: e.target.checked }))} />
-                        僅升息期才換美元
-                      </label>
-                    </TwoCol>
+                    <HintText text="升息期＝最近一次 FOMC 為升息。美元報酬＝匯率變動＋（聯邦基金利率−利差）；均線篩選啟用時，美元比重不適用。決議表與 CPI 需手動更新（src/data）。僅改變權益曲線，歷史回測不構成投資建議。" />
                   </>
                 )}
-                {draft.fedUsdEnabled && (
-                  <TwoCol>
-                    <div>
-                      <FieldLabel text="每次換匯成本（單邊 %）" />
-                      <input type="number" value={draft.fedUsdCost} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdCost: Number(e.target.value) }))} />
-                    </div>
-                    <div>
-                      <FieldLabel text="美元利息＝聯邦基金利率 − 利差（%）" />
-                      <input type="number" value={draft.fedUsdSpread} min={0} max={5} step={0.1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSpread: Number(e.target.value) }))} />
-                    </div>
-                  </TwoCol>
-                )}
-                <HintText text="升息期＝最近一次 FOMC 調整為升息（決議日次一台股交易日起生效，決議表見 src/data/fed_rates.json，新決議需手動補；CPI 條件用 src/data/us_cpi.json，公布日次月 15 日起才使用，新月份需手動補）；美元報酬＝USD/TWD 日報酬＋聯邦基金利率減利差的利息，進出各扣一次換匯成本。只改變權益曲線與績效：交易明細、IC 分析仍以原空方標的計。歷史回測，樣本只有兩段完整升息期，不構成投資建議。" />
               </>
             )}
             <div style={{ marginTop: 14, marginBottom: 18 }}>
@@ -3386,7 +3370,8 @@ function HintText({ text }) {
   return <div style={{ fontSize: 10.5, color: THEME.textFaint, marginTop: 6, lineHeight: 1.5 }}>{text}</div>;
 }
 function TwoCol({ children }) {
-  return <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>{children.map((c, i) => <div key={i} style={{ flex: 1 }}>{c}</div>)}</div>;
+  const items = [].concat(children).filter(Boolean);
+  return <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>{items.map((c, i) => <div key={i} style={{ flex: "1 1 calc(50% - 4px)", minWidth: 0 }}>{c}</div>)}</div>;
 }
 function ToggleRow({ checked, onChange, label }) {
   return (
