@@ -1248,6 +1248,30 @@ function computeDrawdownPct(equitySlice) {
   return dd;
 }
 
+// 左側設定面板的預設值（點選預設策略時，先重設為此值再套入該策略的參數）
+const BASE_DRAFT = {
+  name: "",
+  maEnabled: true,
+  signalAsset: MARKET_META.TW.defaultSignal,
+  maPeriod: 60,
+  maBias: 20,
+  maPriceBasis: "close",
+  vixEnabled: true,
+  vixLookback: 1000,
+  vixMode: "advanced",
+  vixHigh: 28,
+  vixLow: 1,
+  vixExtremeLow: 0.5,
+  combineMode: "AND",
+  btdOverride: false,
+  bullAsset: MARKET_META.TW.defaultBull,
+  bearAsset: MARKET_META.TW.defaultBear,
+  riskFreeRate: 1.5,
+  commissionRate: 0.1425,
+  taxRate: 0.1,
+  icWindow: 60,
+  };
+
 /* ============================================================
    主元件
    ============================================================ */
@@ -1271,28 +1295,7 @@ export default function App() {
   const setRangeEnd = (v) => setRanges((p) => ({ ...p, [market]: { ...p[market], end: v } }));
 
   // 草稿設定（尚未加入比較）
-  const [draft, setDraft] = useState({
-    name: "",
-    maEnabled: true,
-    signalAsset: MARKET_META.TW.defaultSignal,
-    maPeriod: 60,
-    maBias: 20,
-    maPriceBasis: "close",
-    vixEnabled: true,
-    vixLookback: 1000,
-    vixMode: "advanced",
-    vixHigh: 28,
-    vixLow: 1,
-    vixExtremeLow: 0.5,
-    combineMode: "AND",
-    btdOverride: false,
-    bullAsset: MARKET_META.TW.defaultBull,
-    bearAsset: MARKET_META.TW.defaultBear,
-    riskFreeRate: 1.5,
-    commissionRate: 0.1425,
-    taxRate: 0.1,
-    icWindow: 60,
-  });
+  const [draft, setDraft] = useState(() => ({ ...BASE_DRAFT }));
 
   // 各市場各自一份比較清單；其餘程式碼仍以 runs / setRuns 操作「目前市場」的清單
   const [runsByMarket, setRunsByMarket] = useState(() => ({
@@ -1389,6 +1392,8 @@ export default function App() {
     (preset) => {
       setConfigError(null);
       if (market !== "TW") return;
+      // 無論比較清單是否已滿，都先把該策略的參數帶入左側設定面板
+      setDraft({ ...BASE_DRAFT, ...preset.config, name: "" });
       if (runs.length >= MAX_RUNS) {
         setConfigError(`最多同時比較 ${MAX_RUNS} 組策略，請先刪除一組再新增。`);
         return;
@@ -1817,13 +1822,12 @@ export default function App() {
             {market === "TW" ? (
               <>
             <SectionLabel text="預設策略（每日追蹤儀表板）" />
-            <HintText text="對應「台股波動率輪換策略儀表板」每日追蹤的 5 種持倉策略，開啟頁面時已自動載入下方比較清單；可個別刪除，或用下方按鈕重新套用單一策略／全部套用。" />
+            <HintText text="對應「台股波動率輪換策略儀表板」每日追蹤的 5 種持倉策略，開啟頁面時已自動載入下方比較清單；可個別刪除。點選策略會把其參數帶入下方設定面板（可直接微調後加入比較），並重新加入比較清單；比較清單已滿時只帶入參數。" />
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8, marginBottom: 8 }}>
               {PRESETS.map((p) => (
                 <button
                   key={p.id}
                   onClick={() => addPresetRun(p)}
-                  disabled={runs.length >= MAX_RUNS}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -1835,8 +1839,7 @@ export default function App() {
                     fontSize: 12,
                     color: S.text,
                     textAlign: "left",
-                    cursor: runs.length >= MAX_RUNS ? "default" : "pointer",
-                    opacity: runs.length >= MAX_RUNS ? 0.5 : 1,
+                    cursor: "pointer",
                   }}
                 >
                   <span style={{ width: 9, height: 9, borderRadius: 2, background: p.color, flexShrink: 0 }} />
