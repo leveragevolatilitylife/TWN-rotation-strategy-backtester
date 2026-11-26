@@ -21,7 +21,6 @@ import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "
 import MARKET_DATA from "./data/market_data.json";
 import USDTWD from "./data/usdtwd.json";
 import FED_RATES from "./data/fed_rates.json";
-import ETF682 from "./data/etf00682u.json";
 import US_CPI from "./data/us_cpi.json";
 import US_PCE from "./data/us_pce.json";
 import US_CORE_PCE from "./data/us_core_pce.json";
@@ -537,7 +536,7 @@ function getFedUsdSeries(dataset) {
 }
 
 // 00682U（富邦美元指數 ETF）收盤價對齊到回測日期（上市前＝null）。
-// 優先使用資料檔（Stock_data_collection.xlsx）內的 00682U 欄位（每日自動更新）；沒有該欄位才退回內建靜態檔。
+// 使用資料檔（Stock_data_collection.xlsx）內的 00682U 欄位（每日自動更新）；資料檔沒有該欄位則全程 null（不啟用 00682U）。
 const ETF682_LISTING = "2017-03-14";
 const etf682Cache = new WeakMap();
 function getEtf682Series(dataset) {
@@ -545,19 +544,7 @@ function getEtf682Series(dataset) {
   const { dates, n } = dataset;
   const px = new Array(n).fill(null);
   const own = dataset.prices && dataset.prices["00682U"];
-  if (own) {
-    for (let i = 0; i < n; i++) px[i] = dates[i] >= ETF682_LISTING && own[i] > 0 ? own[i] : null;
-  } else {
-    let j = 0;
-    let last = null;
-    for (let i = 0; i < n; i++) {
-      while (j < ETF682.dates.length && ETF682.dates[j] <= dates[i]) {
-        last = ETF682.close[j];
-        j++;
-      }
-      px[i] = last;
-    }
-  }
+  if (own) for (let i = 0; i < n; i++) px[i] = dates[i] >= ETF682_LISTING && own[i] > 0 ? own[i] : null;
   etf682Cache.set(dataset, px);
   return px;
 }

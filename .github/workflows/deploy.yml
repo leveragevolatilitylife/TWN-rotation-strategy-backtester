@@ -87,6 +87,24 @@ jobs:
           cp /tmp/data.xlsx data/Stock_data_collection.xlsx
           ls -l data/Stock_data_collection.xlsx
 
+      # 從資料 repo 的 data 分支抓 Forex_Historical_Data.xlsx（每個平日自動更新），把最新的 USD/TWD 補進 src/data/usdtwd.json
+      # （只往後補；抓不到只警告，沿用 repo 內已提交的檔案，不讓部署失敗）
+      - name: Update USD/TWD from stock-data-collection (Forex_Historical_Data.xlsx)
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          if [ -z "$DATA_REPO_TOKEN" ]; then
+            echo "::warning::未設定 DATA_REPO_TOKEN，USD/TWD 沿用 repo 內已提交的檔案"; exit 0
+          fi
+          TOKEN="$(printf '%s' "$DATA_REPO_TOKEN" | tr -d '[:space:]')"
+          code=$(curl -sS -L -o data/Forex_Historical_Data.xlsx -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" -H "Accept: application/vnd.github.raw" \
+            "https://api.github.com/repos/leveragevolatilitylife/stock-data-collection/contents/Forex_Historical_Data.xlsx?ref=data" || true)
+          if [ "$code" != "200" ] || [ "$(head -c 2 data/Forex_Historical_Data.xlsx)" != "PK" ]; then
+            echo "::warning::下載 Forex_Historical_Data.xlsx 失敗（HTTP $code），USD/TWD 沿用原檔"; rm -f data/Forex_Historical_Data.xlsx
+          fi
+          node scripts/update-usdtwd.mjs
+
       # 自動更新總經資料（FOMC 利率決議、美國 CPI／PCE／核心 PCE 年增率與公布日），來源 FRED API。
       # - 需在本 repo 設定 Secret「FRED_API_KEY」；未設定或抓取失敗只顯示警告，沿用 repo 內已提交的 JSON，不會讓部署失敗。
       # - 只改建置工作目錄內的檔案，不會 commit。
