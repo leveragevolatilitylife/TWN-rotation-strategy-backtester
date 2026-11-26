@@ -23,6 +23,8 @@ import USDTWD from "./data/usdtwd.json";
 import FED_RATES from "./data/fed_rates.json";
 import ETF682 from "./data/etf00682u.json";
 import US_CPI from "./data/us_cpi.json";
+import US_PCE from "./data/us_pce.json";
+import US_CORE_PCE from "./data/us_core_pce.json";
 
 /* ---------- 市場設定 ----------
    資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
@@ -515,17 +517,21 @@ function getFedUsdSeries(dataset) {
     hike[i] = regime;
     ff[i] = mid / 100;
   }
-  const cpi = new Array(n).fill(null);
-  let c = 0;
-  let cv = null;
-  for (let i = 0; i < n; i++) {
-    while (c < US_CPI.releases.length && US_CPI.releases[c][0] <= dates[i]) {
-      cv = US_CPI.releases[c][1];
-      c++;
+  const align = (releases) => {
+    const arr = new Array(n).fill(null);
+    let c = 0;
+    let cv = null;
+    for (let i = 0; i < n; i++) {
+      while (c < releases.length && releases[c][0] <= dates[i]) {
+        cv = releases[c][1];
+        c++;
+      }
+      arr[i] = cv;
     }
-    cpi[i] = cv;
-  }
-  const out = { ret, hike, ff, cpi };
+    return arr;
+  };
+  const infl = { CPI: align(US_CPI.releases), PCE: align(US_PCE.releases), CORE_PCE: align(US_CORE_PCE.releases) };
+  const out = { ret, hike, ff, infl };
   fedUsdCache.set(dataset, out);
   return out;
 }
@@ -631,11 +637,12 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   return { equity: eq, usdMask, usdLabel };
 }
 
-// 升息期旗標；若啟用 CPI 條件，另需美國 CPI 年增率（已公布的最新值）≥ 門檻才算
+// 升息期旗標；若啟用通膨條件，另需美國通膨年增率（CPI／PCE／核心 PCE，已公布的最新值）≥ 門檻才算
 function getHikeFlags(fx, cfg) {
   if (!cfg.fedCpiFilter) return fx.hike;
   const th = cfg.fedCpiMin ?? 3;
-  return fx.hike.map((h, i) => h && fx.cpi[i] != null && fx.cpi[i] >= th);
+  const series = fx.infl[cfg.fedInflSrc ?? "CPI"] || fx.infl.CPI;
+  return fx.hike.map((h, i) => h && series[i] != null && series[i] >= th);
 }
 
 function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
@@ -1620,6 +1627,7 @@ export default function App() {
     fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
     fedCpiFilter: false, // 升息期另需美國 CPI 年增率 ≥ 門檻才啟用美元防禦
     fedCpiMin: 3,
+    fedInflSrc: "CPI", // 通膨指標：CPI｜PCE｜CORE_PCE
     fedGoldFilter: false, // 升息期 00635U 趨勢篩選：前一日收盤在 N 日均線之上才持 00635U，破線改持現金→美元（需「理論美元」模式）
     fedGoldMA: 60, // 篩選用均線天數
     fedUsdWait: 0, // 理論美元模式：防禦段前幾天先持台幣現金（T+2 交割＝2），之後若仍持空方才換美元
@@ -2415,12 +2423,22 @@ export default function App() {
                       <option value="ETF682">00682U 富邦美元指數 ETF</option>
                     </select>
                     <ToggleRow checked={!!draft.fedUsdHikeOnly} onChange={(v) => setDraft((d) => ({ ...d, fedUsdHikeOnly: v }))} label="僅升息期才換美元" />
-                    <ToggleRow checked={!!draft.fedCpiFilter} onChange={(v) => setDraft((d) => ({ ...d, fedCpiFilter: v }))} label="升息期須 CPI 年增率達門檻" />
+                    <ToggleRow checked={!!draft.fedCpiFilter} onChange={(v) => setDraft((d) => ({ ...d, fedCpiFilter: v }))} label="升息期須通膨年增率達門檻" />
                     <ToggleRow checked={!!draft.fedGoldFilter} onChange={(v) => setDraft((d) => ({ ...d, fedGoldFilter: v }))} label="00635U 跌破均線→改持美元" />
                     <TwoCol>
                       {draft.fedCpiFilter && (
                         <div>
-                          <FieldLabel text="CPI 門檻（%）" />
+                          <FieldLabel text="通膨指標" />
+                          <select value={draft.fedInflSrc ?? "CPI"} onChange={(e) => setDraft((d) => ({ ...d, fedInflSrc: e.target.value }))}>
+                            <option value="CPI">CPI</option>
+                            <option value="PCE">PCE</option>
+                            <option value="CORE_PCE">核心 PCE</option>
+                          </select>
+                        </div>
+                      )}
+                      {draft.fedCpiFilter && (
+                        <div>
+                          <FieldLabel text="年增率門檻（%）" />
                           <input type="number" value={draft.fedCpiMin ?? 3} min={0} max={10} step={0.5} onChange={(e) => setDraft((d) => ({ ...d, fedCpiMin: Number(e.target.value) }))} />
                         </div>
                       )}
@@ -2460,7 +2478,7 @@ export default function App() {
                         </div>
                       )}
                     </TwoCol>
-                    <HintText text="升息期＝最近一次 FOMC 為升息。美元報酬＝匯率變動＋（聯邦基金利率−利差）；均線篩選啟用時，美元比重不適用。決議表與 CPI 需手動更新（src/data）。僅改變權益曲線，歷史回測不構成投資建議。" />
+                    <HintText text="升息期＝最近一次 FOMC 為升息。美元報酬＝匯率變動＋（聯邦基金利率−利差）；均線篩選啟用時，美元比重不適用。決議表與通膨資料需手動更新（src/data）。僅改變權益曲線，歷史回測不構成投資建議。" />
                   </>
                 )}
               </>
