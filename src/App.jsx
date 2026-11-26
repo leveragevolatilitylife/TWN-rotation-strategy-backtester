@@ -39,7 +39,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 10; // 8 個預設策略（含 3 個美元防禦實驗）+ 最多 2 組自訂比較
+const MAX_RUNS = 12; // 9 個預設策略（含 4 個美元防禦實驗）+ 最多 3 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -519,20 +519,27 @@ function getFedUsdSeries(dataset) {
   return out;
 }
 
-// 00682U（富邦美元指數 ETF）收盤價對齊到回測日期（無資料或上市前＝null）
+// 00682U（富邦美元指數 ETF）收盤價對齊到回測日期（上市前＝null）。
+// 優先使用資料檔（Stock_data_collection.xlsx）內的 00682U 欄位（每日自動更新）；沒有該欄位才退回內建靜態檔。
+const ETF682_LISTING = "2017-03-14";
 const etf682Cache = new WeakMap();
 function getEtf682Series(dataset) {
   if (etf682Cache.has(dataset)) return etf682Cache.get(dataset);
   const { dates, n } = dataset;
   const px = new Array(n).fill(null);
-  let j = 0;
-  let last = null;
-  for (let i = 0; i < n; i++) {
-    while (j < ETF682.dates.length && ETF682.dates[j] <= dates[i]) {
-      last = ETF682.close[j];
-      j++;
+  const own = dataset.prices && dataset.prices["00682U"];
+  if (own) {
+    for (let i = 0; i < n; i++) px[i] = dates[i] >= ETF682_LISTING && own[i] > 0 ? own[i] : null;
+  } else {
+    let j = 0;
+    let last = null;
+    for (let i = 0; i < n; i++) {
+      while (j < ETF682.dates.length && ETF682.dates[j] <= dates[i]) {
+        last = ETF682.close[j];
+        j++;
+      }
+      px[i] = last;
     }
-    px[i] = last;
   }
   etf682Cache.set(dataset, px);
   return px;
@@ -552,7 +559,10 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   const tax = (cfg.taxRate ?? 0.1) / 100;
   const fxc = (cfg.fedUsdCost ?? 0.3) / 100;
   const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
-  const wait = Math.max(0, Math.round(cfg.fedUsdWait ?? 2));
+  const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682"; // 破線改持 00682U（交易所掛牌，免換匯、免 T+2 等待）
+  const etf = useEtf ? getEtf682Series(dataset) : null;
+  const slip = (cfg.fedUsdSlip ?? 0.3) / 100;
+  const wait = useEtf ? 0 : Math.max(0, Math.round(cfg.fedUsdWait ?? 2));
   const ma = new Array(n).fill(null);
   let acc = 0;
   for (let i = 0; i < n; i++) {
@@ -574,7 +584,8 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
       continue;
     }
     const filterOn = fx.hike[i];
-    const goldOK = !filterOn || (ma[i - 1] != null && G[i - 1] > ma[i - 1]);
+    const etfOk = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用篩選
+    const goldOK = !filterOn || !etfOk || (ma[i - 1] != null && G[i - 1] > ma[i - 1]);
     let h;
     if (goldOK) {
       h = "gold";
@@ -583,7 +594,14 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
       since++;
       h = since > wait ? "usd" : "cash";
     }
-    if (h === "gold") {
+    if (useEtf) {
+      if (h === "gold") {
+        if (prev === "usd") r -= comm + tax + slip + comm; // 賣 00682U（手續費＋證交稅＋滑價）＋買 00635U（手續費）
+      } else {
+        r = etf[i] / etf[i - 1] - 1; // 收盤對收盤（近似）
+        if (prev === "gold") r -= comm + tax + comm + slip; // 賣 00635U（手續費＋證交稅）＋買 00682U（手續費＋滑價）
+      }
+    } else if (h === "gold") {
       if (prev !== "gold") r -= comm + (prev === "usd" ? fxc : 0);
     } else if (h === "cash") {
       r = -(prev === "gold" ? comm + tax : prev === "usd" ? fxc : 0);
@@ -593,7 +611,7 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
     }
     if (h !== "gold") {
       usdMask[i] = true;
-      usdLabel[i] = h === "usd" ? "USD" : "CASH";
+      usdLabel[i] = h === "usd" ? (useEtf ? "00682U" : "USD") : "CASH";
     }
     prev = h;
     eq[i] = eq[i - 1] * (1 + r);
@@ -602,7 +620,7 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
 }
 
 function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
-  if (cfg.fedGoldFilter && (cfg.fedUsdAsset ?? "FX") === "FX") return applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg);
+  if (cfg.fedGoldFilter) return applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg);
   const { n } = dataset;
   const fx = getFedUsdSeries(dataset);
   const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682";
@@ -844,6 +862,20 @@ const PRESETS = [
       fedUsdAsset: "FX",
       fedUsdHikeOnly: true,
       fedUsdWait: 2,
+      fedGoldFilter: true,
+      fedGoldMA: 60,
+    },
+  },
+  {
+    id: "hybrid_goldflt682",
+    name: "Hybrid + 升息期00635U 60MA篩選，破線→00682U（實驗）",
+    color: "#69f0ae",
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdAsset: "ETF682",
+      fedUsdHikeOnly: true,
+      fedUsdSlip: 0.3,
       fedGoldFilter: true,
       fedGoldMA: 60,
     },
@@ -2014,7 +2046,7 @@ export default function App() {
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
-              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋3 組美元防禦實驗" : ""}
+              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋4 組美元防禦實驗" : ""}
             </p>
             <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
               <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
@@ -2337,13 +2369,13 @@ export default function App() {
                           <input type="number" value={draft.fedUsdWait ?? 0} min={0} max={5} step={1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWait: Number(e.target.value) }))} />
                         </div>
                       )}
-                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                      {(
                         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", gridColumn: "1 / -1" }}>
                           <input className="chk" type="checkbox" checked={!!draft.fedGoldFilter} onChange={(e) => setDraft((d) => ({ ...d, fedGoldFilter: e.target.checked }))} />
-                          升息期 00635U 站上均線才持有，破線→現金→美元（忽略下方美元比重）
+                          升息期 00635U 站上均線才持有，破線→美元（理論美元：先現金再換匯；00682U：直接換）（忽略下方比重）
                         </label>
                       )}
-                      {(draft.fedUsdAsset ?? "FX") === "FX" && draft.fedGoldFilter && (
+                      {draft.fedGoldFilter && (
                         <div>
                           <FieldLabel text="00635U 篩選均線（天）" />
                           <input type="number" value={draft.fedGoldMA ?? 60} min={5} max={250} step={5} onChange={(e) => setDraft((d) => ({ ...d, fedGoldMA: Number(e.target.value) }))} />
