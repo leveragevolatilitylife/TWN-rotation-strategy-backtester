@@ -19,6 +19,12 @@ import {
 } from "recharts";
 import { Trash2, Plus, TrendingUp, TrendingDown, Activity, FlaskConical } from "lucide-react";
 import MARKET_DATA from "./data/market_data.json";
+import USDTWD from "./data/usdtwd.json";
+import FED_RATES from "./data/fed_rates.json";
+import ETF682 from "./data/etf00682u.json";
+import US_CPI from "./data/us_cpi.json";
+import US_PCE from "./data/us_pce.json";
+import US_CORE_PCE from "./data/us_core_pce.json";
 
 /* ---------- 市場設定 ----------
    資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
@@ -26,7 +32,7 @@ import MARKET_DATA from "./data/market_data.json";
 const MARKET_META = {
   TW: { label: "台股", defaultBull: "00631L", defaultBear: "00635U", defaultSignal: "0050", vixLookback: 1000 },
 };
-const assetShort = (k) => (k === "CASH" ? "現金" : k);
+const assetShort = (k) => (k === "CASH" ? "現金" : k === "USD" ? "美元" : k);
 
 // 手動新增策略使用的色盤：刻意避開下方 5 個預設策略各自固定的顏色，避免圖表撞色
 // 自訂策略線色：與五組範本策略（藍／洋紅／黃／綠／紅）以及對照組（白／淺青／淺橘…）彼此拉開色相
@@ -36,7 +42,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 10; // 5 個預設策略 + 最多 5 組自訂比較
+const MAX_RUNS = 11; // 6 個預設策略 + 最多 5 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -477,6 +483,214 @@ function computeICSeries(dataset, finalSignal, bullAsset, bearAsset, icWindow) {
    handleAddRun（手動加入）與預設策略（開機自動載入／按鈕載入）皆呼叫此函式，
    確保計算邏輯（含交易明細、IC序列）完全一致。
    ============================================================ */
+/* ---------- FED 週期防禦：升息期且策略持空方標的時，改持美元 ----------
+   制度＝「最近一次調整利率的方向」（升息期／降息期），FOMC 決議日（美東）的下一個台股交易日起生效。
+   美元報酬＝USD/TWD 日報酬 +（聯邦基金利率 − 利差）/252；進出美元各扣一次換匯成本（單邊）。
+   僅作用於權益曲線：appliedAsset／交易明細仍以原本的空方標的記錄，並另外回傳 usdMask（哪些日子實際持有美元）。 */
+const fedUsdCache = new WeakMap();
+function getFedUsdSeries(dataset) {
+  if (fedUsdCache.has(dataset)) return fedUsdCache.get(dataset);
+  const { dates, n } = dataset;
+  const fx = new Array(n).fill(null);
+  let j = 0;
+  let last = USDTWD.close[0];
+  for (let i = 0; i < n; i++) {
+    while (j < USDTWD.dates.length && USDTWD.dates[j] <= dates[i]) {
+      last = USDTWD.close[j];
+      j++;
+    }
+    fx[i] = last;
+  }
+  const ret = fx.map((v, i) => (i === 0 ? 0 : v / fx[i - 1] - 1));
+  const hike = new Array(n).fill(false);
+  const ff = new Array(n).fill(FED_RATES.initialMid / 100);
+  let d = 0;
+  let mid = FED_RATES.initialMid;
+  let regime = false;
+  for (let i = 0; i < n; i++) {
+    while (d < FED_RATES.decisions.length && FED_RATES.decisions[d][0] < dates[i]) {
+      const nm = FED_RATES.decisions[d][1];
+      regime = nm > mid;
+      mid = nm;
+      d++;
+    }
+    hike[i] = regime;
+    ff[i] = mid / 100;
+  }
+  const align = (releases) => {
+    const arr = new Array(n).fill(null);
+    let c = 0;
+    let cv = null;
+    for (let i = 0; i < n; i++) {
+      while (c < releases.length && releases[c][0] <= dates[i]) {
+        cv = releases[c][1];
+        c++;
+      }
+      arr[i] = cv;
+    }
+    return arr;
+  };
+  const infl = { CPI: align(US_CPI.releases), PCE: align(US_PCE.releases), CORE_PCE: align(US_CORE_PCE.releases) };
+  const out = { ret, hike, ff, infl };
+  fedUsdCache.set(dataset, out);
+  return out;
+}
+
+// 00682U（富邦美元指數 ETF）收盤價對齊到回測日期（上市前＝null）。
+// 優先使用資料檔（Stock_data_collection.xlsx）內的 00682U 欄位（每日自動更新）；沒有該欄位才退回內建靜態檔。
+const ETF682_LISTING = "2017-03-14";
+const etf682Cache = new WeakMap();
+function getEtf682Series(dataset) {
+  if (etf682Cache.has(dataset)) return etf682Cache.get(dataset);
+  const { dates, n } = dataset;
+  const px = new Array(n).fill(null);
+  const own = dataset.prices && dataset.prices["00682U"];
+  if (own) {
+    for (let i = 0; i < n; i++) px[i] = dates[i] >= ETF682_LISTING && own[i] > 0 ? own[i] : null;
+  } else {
+    let j = 0;
+    let last = null;
+    for (let i = 0; i < n; i++) {
+      while (j < ETF682.dates.length && ETF682.dates[j] <= dates[i]) {
+        last = ETF682.close[j];
+        j++;
+      }
+      px[i] = last;
+    }
+  }
+  etf682Cache.set(dataset, px);
+  return px;
+}
+
+/* ---------- 升息期 00635U 趨勢篩選----------
+   升息期且 Hybrid 持空方標的（00635U）時：前一日 00635U 收盤在自己的 N 日均線之上才持 00635U；
+   破線則賣出 00635U，先持台幣現金 wait 天（T+2 交割），之後若仍破線才換成美元（USD/TWD＋利息，換匯單邊成本 fedUsdCost）；
+   轉回 00635U（或回到多方）時換回。非升息期的防禦段維持持 00635U。
+   進出 00635U 計手續費（買）／手續費＋證交稅（賣）。近似：以收盤對收盤計。 */
+function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
+  const { n } = dataset;
+  const fx = getFedUsdSeries(dataset);
+  const hikeFlags = getHikeFlags(fx, cfg);
+  const G = dataset.prices[bearAsset];
+  const L = Math.max(2, Math.round(cfg.fedGoldMA ?? 60));
+  const comm = (cfg.commissionRate ?? 0.1425) / 100;
+  const tax = (cfg.taxRate ?? 0.1) / 100;
+  const fxc = (cfg.fedUsdCost ?? 0.3) / 100;
+  const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
+  const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682"; // 破線改持 00682U（交易所掛牌，免換匯、免 T+2 等待）
+  const etf = useEtf ? getEtf682Series(dataset) : null;
+  const slip = (cfg.fedUsdSlip ?? 0.3) / 100;
+  const wait = useEtf ? 0 : Math.max(0, Math.round(cfg.fedUsdWait ?? 2));
+  const ma = new Array(n).fill(null);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc += G[i];
+    if (i >= L) acc -= G[i - L];
+    if (i >= L - 1) ma[i] = acc / L;
+  }
+  const usdMask = new Array(n).fill(false);
+  const usdLabel = new Array(n).fill(null);
+  const eq = new Array(n).fill(1);
+  let prev = "gold";
+  let since = 0;
+  for (let i = 1; i < n; i++) {
+    let r = equity[i] / equity[i - 1] - 1;
+    if (appliedAsset[i] !== bearAsset) {
+      prev = "gold";
+      since = 0;
+      eq[i] = eq[i - 1] * (1 + r);
+      continue;
+    }
+    const filterOn = hikeFlags[i];
+    const etfOk = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用篩選
+    const goldOK = !filterOn || !etfOk || (ma[i - 1] != null && G[i - 1] > ma[i - 1]);
+    let h;
+    if (goldOK) {
+      h = "gold";
+      since = 0;
+    } else {
+      since++;
+      h = since > wait ? "usd" : "cash";
+    }
+    if (useEtf) {
+      if (h === "gold") {
+        if (prev === "usd") r -= comm + tax + slip + comm; // 賣 00682U（手續費＋證交稅＋滑價）＋買 00635U（手續費）
+      } else {
+        r = etf[i] / etf[i - 1] - 1; // 收盤對收盤（近似）
+        if (prev === "gold") r -= comm + tax + comm + slip; // 賣 00635U（手續費＋證交稅）＋買 00682U（手續費＋滑價）
+      }
+    } else if (h === "gold") {
+      if (prev !== "gold") r -= comm + (prev === "usd" ? fxc : 0);
+    } else if (h === "cash") {
+      r = -(prev === "gold" ? comm + tax : prev === "usd" ? fxc : 0);
+    } else {
+      const ru = (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
+      r = ru - (prev === "gold" ? comm + tax + fxc : prev === "cash" ? fxc : 0);
+    }
+    if (h !== "gold") {
+      usdMask[i] = true;
+      usdLabel[i] = h === "usd" ? (useEtf ? "00682U" : "USD") : "CASH";
+    }
+    prev = h;
+    eq[i] = eq[i - 1] * (1 + r);
+  }
+  return { equity: eq, usdMask, usdLabel };
+}
+
+// 升息期旗標；若啟用通膨條件，另需美國通膨年增率（CPI／PCE／核心 PCE，已公布的最新值）≥ 門檻才算
+function getHikeFlags(fx, cfg) {
+  if (!cfg.fedCpiFilter) return fx.hike;
+  const th = cfg.fedCpiMin ?? 3;
+  const series = fx.infl[cfg.fedInflSrc ?? "PCE"] || fx.infl.PCE;
+  return fx.hike.map((h, i) => h && series[i] != null && series[i] >= th);
+}
+
+function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
+  if (cfg.fedGoldFilter) return applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg);
+  const { n } = dataset;
+  const fx = getFedUsdSeries(dataset);
+  const hikeFlags = getHikeFlags(fx, cfg);
+  const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682";
+  const etf = useEtf ? getEtf682Series(dataset) : null;
+  const cost = (cfg.fedUsdCost ?? 0.3) / 100;
+  const spread = (cfg.fedUsdSpread ?? 0.5) / 100;
+  const comm = (cfg.commissionRate ?? 0.1425) / 100;
+  const tax = (cfg.taxRate ?? 0.1) / 100;
+  const slip = (cfg.fedUsdSlip ?? 0.3) / 100; // 00682U 流動性差：單邊額外滑價
+  const w = Math.min(1, Math.max(0, (cfg.fedUsdWeight ?? 100) / 100)); // 防禦段中「美元」的比重（其餘仍持空方標的）
+  const hikeOnly = !!cfg.fedUsdHikeOnly; // true＝僅升息期；false＝所有防禦段
+  const usdMask = new Array(n).fill(false);
+  const eq = new Array(n).fill(1);
+  const wait = Math.max(0, Math.round(cfg.fedUsdWait ?? 0)); // 賣出多方後的 T+2 交割等待：防禦段前 wait 天，美元部位暫以台幣現金持有
+  let prevShare = 0;
+  let prevUsd = 0;
+  let segDay = 0; // 目前連續持空方標的的第幾天
+  for (let i = 1; i < n; i++) {
+    segDay = appliedAsset[i] === bearAsset ? segDay + 1 : 0;
+    const listed = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用
+    const share = appliedAsset[i] === bearAsset && (!hikeOnly || hikeFlags[i]) && listed ? w : 0;
+    usdMask[i] = share > 0;
+    let r = equity[i] / equity[i - 1] - 1;
+    const inCash = !useEtf && wait > 0 && share > 0 && segDay <= wait; // 等待交割期間：該比重持台幣現金（報酬 0、尚未換匯）
+    if (inCash) {
+      r = (1 - share) * r - (segDay === 1 ? share * (comm + tax) : 0); // 多方賣出成本仍要付（該比重沒買空方標的）
+    } else if (share > 0) {
+      const ru = useEtf
+        ? etf[i] / etf[i - 1] - 1 // 近似：以收盤對收盤計（進出場日的開盤價效果忽略）
+        : (1 + fx.ret[i]) * (1 + Math.max(0, fx.ff[i] - spread) / 252) - 1;
+      r = (1 - share) * r + share * ru;
+    }
+    const usdShare = inCash ? 0 : share; // 真正持有美元的比重（換匯成本只對它的變動計）
+    const d = useEtf ? share - prevShare : usdShare - prevUsd;
+    if (useEtf) r -= d > 0 ? d * (comm + slip) : -d * (comm + tax + slip); // 買：手續費＋滑價；賣：手續費＋證交稅＋滑價
+    else r -= cost * Math.abs(d);
+    prevShare = share;
+    prevUsd = usdShare;
+    eq[i] = eq[i - 1] * (1 + r);
+  }
+  return { equity: eq, usdMask };
+}
+
 function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   let sigA = null;
   let sigB = null;
@@ -493,17 +707,27 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
   }
   const finalSignal = cfg.maEnabled && cfg.vixEnabled ? combineSignals(sigA, sigB, comb.mode, btdMask) : cfg.maEnabled ? sigA : sigB;
 
-  const { equity, appliedAsset, trades, tradeList } = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
+  const bt = runBacktest(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, {
     commissionRate: cfg.commissionRate,
     taxRate: cfg.taxRate,
   });
+  const { appliedAsset, trades, tradeList } = bt;
+  let equity = bt.equity;
+  let usdMask = null;
+  let usdLabel = null;
+  if (cfg.fedUsdEnabled && dataset.anchor === "0050") {
+    const ov = applyFedUsdOverlay(dataset, bt.equity, appliedAsset, cfg.bearAsset, cfg);
+    equity = ov.equity;
+    usdMask = ov.usdMask;
+    usdLabel = ov.usdLabel || null;
+  }
   const { icRolling, icExpanding } = computeICSeries(dataset, finalSignal, cfg.bullAsset, cfg.bearAsset, cfg.icWindow);
 
   const endIdx = lastAssetEndIdx == null ? dataset.n - 1 : lastAssetEndIdx;
   let lastAsset = null;
   for (let i = endIdx; i >= 0; i--) {
     if (appliedAsset[i]) {
-      lastAsset = appliedAsset[i];
+      lastAsset = usdLabel && usdLabel[i] ? usdLabel[i] : usdMask && usdMask[i] ? ((cfg.fedUsdAsset ?? "FX") === "ETF682" ? ((cfg.fedUsdWeight ?? 100) >= 100 ? "00682U" : "00682U/" + appliedAsset[i]) : (cfg.fedUsdWeight ?? 100) >= 100 ? "USD" : "USD/" + appliedAsset[i]) : appliedAsset[i];
       break;
     }
   }
@@ -515,6 +739,8 @@ function buildRunFromConfig(dataset, cfg, name, color, lastAssetEndIdx) {
     config: { ...cfg },
     equity,
     appliedAsset,
+    usdMask,
+    usdLabel,
     trades,
     tradeList,
     icRolling,
@@ -535,6 +761,22 @@ const PRESET_BASE = {
   taxRate: 0.1,
   icWindow: 60,
 };
+const PRESETS_HYBRID_CFG = {
+  ...PRESET_BASE,
+  maEnabled: true,
+  maPeriod: 60,
+  maBias: 20,
+  maPriceBasis: "open",
+  vixEnabled: true,
+  vixLookback: 1000,
+  vixMode: "advanced",
+  vixHigh: 28,
+  vixLow: 1,
+  vixExtremeLow: 0.5,
+  combineMode: "HOLD",
+  btdOverride: true,
+};
+
 const PRESETS = [
   {
     id: "ma_rotation",
@@ -630,6 +872,24 @@ const PRESETS = [
       vixLow: 1,
       vixExtremeLow: 0.5,
       combineMode: "OR",
+    },
+  },
+  {
+    id: "hybrid_iii",
+    name: "MARS+VRS Hybrid III",
+    color: "#ff8a65",
+    // Hybrid + FED 升息期且 PCE 年增率≥3% 時，防禦段 00635U 跌破 60MA → 改持 00682U（美元）
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdAsset: "ETF682",
+      fedUsdHikeOnly: true,
+      fedUsdSlip: 0.3,
+      fedGoldFilter: true,
+      fedGoldMA: 60,
+      fedCpiFilter: true,
+      fedInflSrc: "PCE",
+      fedCpiMin: 3,
     },
   },
 ];
@@ -1270,6 +1530,19 @@ const BASE_DRAFT = {
   commissionRate: 0.1425,
   taxRate: 0.1,
   icWindow: 60,
+  fedUsdEnabled: false, // 升息期且持空方標的時改持美元（僅台股）
+  fedUsdCost: 0.3, // 每次換匯成本（單邊，%）
+  fedUsdSpread: 0.5, // 美元利息 = 聯邦基金利率 − 利差（%）
+  fedUsdWeight: 100, // 防禦段中持美元的比重（%），其餘持空方標的
+  fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
+  fedUsdAsset: "FX", // "FX"＝理論美元（USD/TWD＋利息）；"ETF682"＝實際持有 00682U（含手續費、證交稅、流動性滑價）
+  fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
+  fedCpiFilter: false, // 升息期另需美國通膨年增率 ≥ 門檻才啟用美元防禦
+  fedCpiMin: 3,
+  fedInflSrc: "PCE", // 通膨指標：PCE（預設，Fed 目標所用）｜CPI｜CORE_PCE
+  fedGoldFilter: false, // 升息期 00635U 趨勢篩選：前一日收盤在 N 日均線之上才持 00635U，破線改持現金→美元（需「理論美元」模式）
+  fedGoldMA: 60, // 篩選用均線天數
+  fedUsdWait: 0, // 理論美元模式：防禦段前幾天先持台幣現金（T+2 交割＝2），之後若仍持空方才換美元
   };
 
 /* ============================================================
@@ -1574,7 +1847,7 @@ export default function App() {
         isBench: false,
         // 最新持倉：依「目前所選日期區間的結束日」回頭找最後一個有效持倉（不可使用建立 run 時快取的值）
         lastAsset: (() => {
-          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.appliedAsset[i];
+          for (let i = eI; i >= 0; i--) if (run.appliedAsset[i]) return run.usdLabel && run.usdLabel[i] ? run.usdLabel[i] : run.usdMask && run.usdMask[i] ? "USD" : run.appliedAsset[i];
           return null;
         })(),
         ...stats,
@@ -1774,7 +2047,7 @@ export default function App() {
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
-              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略" : ""}
+              {market === "TW" ? "・已預載 6 組預設策略（含 Hybrid III）" : ""}
             </p>
             <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
               <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
@@ -2072,6 +2345,81 @@ export default function App() {
             </TwoCol>
             <HintText text="輪動當天：舊標的以「前收→當日開盤」計隔夜報酬並於開盤扣賣出成本，新標的於開盤買進扣手續費後，計「開盤→當日收盤」報酬；未輪動的日子維持一般收盤對收盤報酬、不產生成本。" />
 
+            {dataset.anchor === "0050" && (
+              <>
+                <SectionLabel text="FED 週期防禦" />
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", marginBottom: 8 }}>
+                  <input className="chk" type="checkbox" checked={!!draft.fedUsdEnabled} onChange={(e) => setDraft((d) => ({ ...d, fedUsdEnabled: e.target.checked }))} />
+                  持空方標的（防禦段）時，改持美元
+                </label>
+                {draft.fedUsdEnabled && (
+                  <>
+                    <FieldLabel text="美元部位標的" />
+                    <select style={{ marginBottom: 8 }} value={draft.fedUsdAsset ?? "FX"} onChange={(e) => setDraft((d) => ({ ...d, fedUsdAsset: e.target.value }))}>
+                      <option value="FX">理論美元（USD/TWD＋利息）</option>
+                      <option value="ETF682">00682U 富邦美元指數 ETF</option>
+                    </select>
+                    <ToggleRow checked={!!draft.fedUsdHikeOnly} onChange={(v) => setDraft((d) => ({ ...d, fedUsdHikeOnly: v }))} label="僅升息期才換美元" />
+                    <ToggleRow checked={!!draft.fedCpiFilter} onChange={(v) => setDraft((d) => ({ ...d, fedCpiFilter: v }))} label="升息期須通膨年增率達門檻" />
+                    <ToggleRow checked={!!draft.fedGoldFilter} onChange={(v) => setDraft((d) => ({ ...d, fedGoldFilter: v }))} label="00635U 跌破均線→改持美元" />
+                    <TwoCol>
+                      {draft.fedCpiFilter && (
+                        <div>
+                          <FieldLabel text="通膨指標" />
+                          <select value={draft.fedInflSrc ?? "PCE"} onChange={(e) => setDraft((d) => ({ ...d, fedInflSrc: e.target.value }))}>
+                            <option value="PCE">PCE</option>
+                            <option value="CPI">CPI</option>
+                            <option value="CORE_PCE">核心 PCE</option>
+                          </select>
+                        </div>
+                      )}
+                      {draft.fedCpiFilter && (
+                        <div>
+                          <FieldLabel text="年增率門檻（%）" />
+                          <input type="number" value={draft.fedCpiMin ?? 3} min={0} max={10} step={0.5} onChange={(e) => setDraft((d) => ({ ...d, fedCpiMin: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {draft.fedGoldFilter && (
+                        <div>
+                          <FieldLabel text="均線（天）" />
+                          <input type="number" value={draft.fedGoldMA ?? 60} min={5} max={250} step={5} onChange={(e) => setDraft((d) => ({ ...d, fedGoldMA: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {!draft.fedGoldFilter && (
+                        <div>
+                          <FieldLabel text="美元比重（%）" />
+                          <input type="number" value={draft.fedUsdWeight ?? 100} min={0} max={100} step={10} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWeight: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" ? (
+                        <div>
+                          <FieldLabel text="T+2 現金等待（天）" />
+                          <input type="number" value={draft.fedUsdWait ?? 0} min={0} max={5} step={1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWait: Number(e.target.value) }))} />
+                        </div>
+                      ) : (
+                        <div>
+                          <FieldLabel text="單邊滑價（%）" />
+                          <input type="number" value={draft.fedUsdSlip ?? 0.3} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSlip: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                        <div>
+                          <FieldLabel text="換匯成本（單邊 %）" />
+                          <input type="number" value={draft.fedUsdCost} min={0} max={5} step={0.05} onChange={(e) => setDraft((d) => ({ ...d, fedUsdCost: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                      {(draft.fedUsdAsset ?? "FX") === "FX" && (
+                        <div>
+                          <FieldLabel text="美元利差（%）" />
+                          <input type="number" value={draft.fedUsdSpread} min={0} max={5} step={0.1} onChange={(e) => setDraft((d) => ({ ...d, fedUsdSpread: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                    </TwoCol>
+                    <HintText text="升息期＝最近一次 FOMC 為升息。美元報酬＝匯率變動＋（聯邦基金利率−利差）；均線篩選啟用時，美元比重不適用。決議表與通膨資料需手動更新（src/data）。僅改變權益曲線，歷史回測不構成投資建議。" />
+                  </>
+                )}
+              </>
+            )}
             <div style={{ marginTop: 14, marginBottom: 18 }}>
               <FieldLabel text="無風險利率（年化 %，供 Sharpe/Sortino 使用）" />
               <input type="number" value={draft.riskFreeRate} step={0.1} onChange={(e) => setDraft((d) => ({ ...d, riskFreeRate: Number(e.target.value) }))} />
@@ -2977,7 +3325,8 @@ function HintText({ text }) {
   return <div style={{ fontSize: 10.5, color: THEME.textFaint, marginTop: 6, lineHeight: 1.5 }}>{text}</div>;
 }
 function TwoCol({ children }) {
-  return <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>{children.map((c, i) => <div key={i} style={{ flex: 1 }}>{c}</div>)}</div>;
+  const items = [].concat(children).filter(Boolean);
+  return <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>{items.map((c, i) => <div key={i} style={{ flex: "1 1 calc(50% - 4px)", minWidth: 0 }}>{c}</div>)}</div>;
 }
 function ToggleRow({ checked, onChange, label }) {
   return (
