@@ -40,7 +40,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 13; // 10 個預設策略（含 5 個美元防禦實驗）+ 最多 3 組自訂比較
+const MAX_RUNS = 14; // 11 個預設策略（含 6 個美元防禦實驗）+ 最多 3 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -910,6 +910,22 @@ const PRESETS = [
       fedUsdAsset: "ETF682",
       fedUsdHikeOnly: true,
       fedUsdSlip: 0.3,
+      fedGoldFilter: true,
+      fedGoldMA: 60,
+      fedCpiFilter: true,
+      fedCpiMin: 3,
+    },
+  },
+  {
+    id: "hybrid_cpifx",
+    name: "Hybrid + 升息期且CPI≥3%：60MA篩選，破線→美元（實驗）",
+    color: "#f48fb1",
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdAsset: "FX",
+      fedUsdHikeOnly: true,
+      fedUsdWait: 2,
       fedGoldFilter: true,
       fedGoldMA: 60,
       fedCpiFilter: true,
@@ -2084,7 +2100,7 @@ export default function App() {
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
-              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋5 組美元防禦實驗" : ""}
+              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋6 組美元防禦實驗" : ""}
             </p>
             <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
               <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
