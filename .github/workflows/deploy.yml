@@ -87,6 +87,14 @@ jobs:
           cp /tmp/data.xlsx data/Stock_data_collection.xlsx
           ls -l data/Stock_data_collection.xlsx
 
+      # 自動更新總經資料（FOMC 利率決議、美國 CPI／PCE／核心 PCE 年增率與公布日），來源 FRED API。
+      # - 需在本 repo 設定 Secret「FRED_API_KEY」；未設定或抓取失敗只顯示警告，沿用 repo 內已提交的 JSON，不會讓部署失敗。
+      # - 只改建置工作目錄內的檔案，不會 commit。
+      - name: Update macro data (FOMC / CPI / PCE) from FRED
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: node scripts/update-macro.mjs
+
       # 這一步會讀取 data/Stock_data_collection.xlsx，重新產生 src/data/twn_data.json
       # 只要您把新版 xlsx 檔覆蓋掉 data/Stock_data_collection.xlsx 並 push，
       # 這裡就會自動重新解析，網站上的回測資料就會跟著更新，不需要手動改任何程式碼。

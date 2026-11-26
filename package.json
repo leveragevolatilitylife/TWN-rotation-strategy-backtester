@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "parse-data": "node scripts/parse-xlsx.mjs",
-    "parse-usdtwd": "node scripts/parse-usdtwd.mjs"
+    "parse-usdtwd": "node scripts/parse-usdtwd.mjs",
+    "update-macro": "node scripts/update-macro.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",
