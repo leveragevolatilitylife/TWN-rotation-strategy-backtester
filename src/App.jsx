@@ -22,6 +22,7 @@ import MARKET_DATA from "./data/market_data.json";
 import USDTWD from "./data/usdtwd.json";
 import FED_RATES from "./data/fed_rates.json";
 import ETF682 from "./data/etf00682u.json";
+import US_CPI from "./data/us_cpi.json";
 
 /* ---------- 市場設定 ----------
    資料來自 Excel 的各市場分頁（scripts/parse-xlsx.mjs 轉成 market_data.json）：
@@ -39,7 +40,7 @@ const BENCH_COLORS = { "0050": "#ffffff", "00631L": "#8ae6ff", "00635U": "#ffcf8
 const BENCH_DASHES = ["7 4", "2 3", "9 3 2 3", "4 4"];
 const BENCH_PALETTE = ["#ffffff", "#8ae6ff", "#ffcf8a", "#d0b3ff", "#ffa3a3", "#b5ffb0"];
 const benchColor = (k, idx) => BENCH_COLORS[k] || BENCH_PALETTE[idx % BENCH_PALETTE.length];
-const MAX_RUNS = 12; // 9 個預設策略（含 4 個美元防禦實驗）+ 最多 3 組自訂比較
+const MAX_RUNS = 13; // 10 個預設策略（含 5 個美元防禦實驗）+ 最多 3 組自訂比較
 
 const THEME = {
   bg: "#0b0f14",
@@ -514,7 +515,17 @@ function getFedUsdSeries(dataset) {
     hike[i] = regime;
     ff[i] = mid / 100;
   }
-  const out = { ret, hike, ff };
+  const cpi = new Array(n).fill(null);
+  let c = 0;
+  let cv = null;
+  for (let i = 0; i < n; i++) {
+    while (c < US_CPI.releases.length && US_CPI.releases[c][0] <= dates[i]) {
+      cv = US_CPI.releases[c][1];
+      c++;
+    }
+    cpi[i] = cv;
+  }
+  const out = { ret, hike, ff, cpi };
   fedUsdCache.set(dataset, out);
   return out;
 }
@@ -553,6 +564,7 @@ function getEtf682Series(dataset) {
 function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   const { n } = dataset;
   const fx = getFedUsdSeries(dataset);
+  const hikeFlags = getHikeFlags(fx, cfg);
   const G = dataset.prices[bearAsset];
   const L = Math.max(2, Math.round(cfg.fedGoldMA ?? 60));
   const comm = (cfg.commissionRate ?? 0.1425) / 100;
@@ -583,7 +595,7 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
       eq[i] = eq[i - 1] * (1 + r);
       continue;
     }
-    const filterOn = fx.hike[i];
+    const filterOn = hikeFlags[i];
     const etfOk = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用篩選
     const goldOK = !filterOn || !etfOk || (ma[i - 1] != null && G[i - 1] > ma[i - 1]);
     let h;
@@ -619,10 +631,18 @@ function applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   return { equity: eq, usdMask, usdLabel };
 }
 
+// 升息期旗標；若啟用 CPI 條件，另需美國 CPI 年增率（已公布的最新值）≥ 門檻才算
+function getHikeFlags(fx, cfg) {
+  if (!cfg.fedCpiFilter) return fx.hike;
+  const th = cfg.fedCpiMin ?? 3;
+  return fx.hike.map((h, i) => h && fx.cpi[i] != null && fx.cpi[i] >= th);
+}
+
 function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   if (cfg.fedGoldFilter) return applyGoldFilterOverlay(dataset, equity, appliedAsset, bearAsset, cfg);
   const { n } = dataset;
   const fx = getFedUsdSeries(dataset);
+  const hikeFlags = getHikeFlags(fx, cfg);
   const useEtf = (cfg.fedUsdAsset ?? "FX") === "ETF682";
   const etf = useEtf ? getEtf682Series(dataset) : null;
   const cost = (cfg.fedUsdCost ?? 0.3) / 100;
@@ -641,7 +661,7 @@ function applyFedUsdOverlay(dataset, equity, appliedAsset, bearAsset, cfg) {
   for (let i = 1; i < n; i++) {
     segDay = appliedAsset[i] === bearAsset ? segDay + 1 : 0;
     const listed = !useEtf || (etf[i] != null && etf[i - 1] != null); // 00682U 上市前不啟用
-    const share = appliedAsset[i] === bearAsset && (!hikeOnly || fx.hike[i]) && listed ? w : 0;
+    const share = appliedAsset[i] === bearAsset && (!hikeOnly || hikeFlags[i]) && listed ? w : 0;
     usdMask[i] = share > 0;
     let r = equity[i] / equity[i - 1] - 1;
     const inCash = !useEtf && wait > 0 && share > 0 && segDay <= wait; // 等待交割期間：該比重持台幣現金（報酬 0、尚未換匯）
@@ -878,6 +898,22 @@ const PRESETS = [
       fedUsdSlip: 0.3,
       fedGoldFilter: true,
       fedGoldMA: 60,
+    },
+  },
+  {
+    id: "hybrid_cpi682",
+    name: "Hybrid + 升息期且CPI≥3%：60MA篩選，破線→00682U（實驗）",
+    color: "#ff8a65",
+    config: {
+      ...PRESETS_HYBRID_CFG,
+      fedUsdEnabled: true,
+      fedUsdAsset: "ETF682",
+      fedUsdHikeOnly: true,
+      fedUsdSlip: 0.3,
+      fedGoldFilter: true,
+      fedGoldMA: 60,
+      fedCpiFilter: true,
+      fedCpiMin: 3,
     },
   },
   {
@@ -1566,6 +1602,8 @@ export default function App() {
     fedUsdHikeOnly: false, // true＝僅升息期才換美元；false＝所有防禦段都換
     fedUsdAsset: "FX", // "FX"＝理論美元（USD/TWD＋利息）；"ETF682"＝實際持有 00682U（含手續費、證交稅、流動性滑價）
     fedUsdSlip: 0.3, // 00682U 單邊滑價（%）
+    fedCpiFilter: false, // 升息期另需美國 CPI 年增率 ≥ 門檻才啟用美元防禦
+    fedCpiMin: 3,
     fedGoldFilter: false, // 升息期 00635U 趨勢篩選：前一日收盤在 N 日均線之上才持 00635U，破線改持現金→美元（需「理論美元」模式）
     fedGoldMA: 60, // 篩選用均線天數
     fedUsdWait: 0, // 理論美元模式：防禦段前幾天先持台幣現金（T+2 交割＝2），之後若仍持空方才換美元
@@ -2046,7 +2084,7 @@ export default function App() {
             </h1>
             <p style={{ fontSize: 13, color: S.textMuted, margin: "4px 0 0" }}>
               VIX Roll Yield ／ {draft.signalAsset} 均線乖離率 輪動邏輯・可自由選擇攻擊／防禦標的並排比較
-              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋4 組美元防禦實驗" : ""}
+              {market === "TW" ? "・已預載 5 組每日追蹤儀表板預設策略＋5 組美元防禦實驗" : ""}
             </p>
             <div style={{ fontSize: 11.5, lineHeight: 1.6, color: S.gold, border: `1px solid ${S.gold}`, borderRadius: 4, padding: "6px 10px", marginTop: 8, maxWidth: 760 }}>
               <b>僅供研究與教育用途，不構成投資建議。</b>所有結果皆為歷史回測，不代表未來績效；槓桿／反向 ETF 風險高，且資料可能有誤或缺漏，投資決策請自行判斷並承擔風險。
@@ -2389,6 +2427,18 @@ export default function App() {
                       )}
                     </TwoCol>
                     <TwoCol>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer", alignSelf: "end", paddingBottom: 8 }}>
+                        <input className="chk" type="checkbox" checked={!!draft.fedCpiFilter} onChange={(e) => setDraft((d) => ({ ...d, fedCpiFilter: e.target.checked }))} />
+                        另需美國 CPI 年增率達門檻才算升息期防禦
+                      </label>
+                      {draft.fedCpiFilter && (
+                        <div>
+                          <FieldLabel text="CPI 年增率門檻（%）" />
+                          <input type="number" value={draft.fedCpiMin ?? 3} min={0} max={10} step={0.5} onChange={(e) => setDraft((d) => ({ ...d, fedCpiMin: Number(e.target.value) }))} />
+                        </div>
+                      )}
+                    </TwoCol>
+                    <TwoCol>
                       <div>
                         <FieldLabel text="防禦段中美元比重（%）" />
                         <input type="number" value={draft.fedUsdWeight ?? 100} min={0} max={100} step={10} onChange={(e) => setDraft((d) => ({ ...d, fedUsdWeight: Number(e.target.value) }))} />
@@ -2412,7 +2462,7 @@ export default function App() {
                     </div>
                   </TwoCol>
                 )}
-                <HintText text="升息期＝最近一次 FOMC 調整為升息（決議日次一台股交易日起生效，決議表見 src/data/fed_rates.json，新決議需手動補）；美元報酬＝USD/TWD 日報酬＋聯邦基金利率減利差的利息，進出各扣一次換匯成本。只改變權益曲線與績效：交易明細、IC 分析仍以原空方標的計。歷史回測，樣本只有兩段完整升息期，不構成投資建議。" />
+                <HintText text="升息期＝最近一次 FOMC 調整為升息（決議日次一台股交易日起生效，決議表見 src/data/fed_rates.json，新決議需手動補；CPI 條件用 src/data/us_cpi.json，公布日次月 15 日起才使用，新月份需手動補）；美元報酬＝USD/TWD 日報酬＋聯邦基金利率減利差的利息，進出各扣一次換匯成本。只改變權益曲線與績效：交易明細、IC 分析仍以原空方標的計。歷史回測，樣本只有兩段完整升息期，不構成投資建議。" />
               </>
             )}
             <div style={{ marginTop: 14, marginBottom: 18 }}>
