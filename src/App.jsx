@@ -1590,6 +1590,8 @@ export default function App() {
   const [logScale, setLogScale] = useState(false);
   const [zoom, setZoom] = useState(null); // 縮放區間 {s, e}（日期字串），null＝顯示全部
   const [zoomRebase, setZoomRebase] = useState(false); // 縮放後權益曲線以區間起點歸零
+  const [hoverEqIdx, setHoverEqIdx] = useState(null); // 權益曲線游標位置（資料點索引）
+  const [hoverDdIdx, setHoverDdIdx] = useState(null); // 回撤曲線游標位置
   const [hoverRunKey, setHoverRunKey] = useState(null); // 滑鼠停在哪條策略曲線上（用於浮現換倉標記）
   const [configError, setConfigError] = useState(null);
 
@@ -2696,8 +2698,20 @@ export default function App() {
               {chartData.series.length === 0 ? (
                 <EmptyState S={S} />
               ) : (
+                <>
+                <ReadoutStrip
+                  S={S}
+                  point={hoverEqIdx != null ? equityPlot.points[hoverEqIdx] : null}
+                  series={chartData.series}
+                  fmt={(v) => fmtReturnPct(logScale ? (v - 1) * 100 : v, 1)}
+                />
                 <ResponsiveContainer width="100%" height={420}>
-                  <LineChart data={equityPlot.points} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
+                  <LineChart
+                    data={equityPlot.points}
+                    margin={{ top: 6, right: 16, bottom: 0, left: 0 }}
+                    onMouseMove={(st) => { if (st && st.activeTooltipIndex != null) setHoverEqIdx(st.activeTooltipIndex); }}
+                    onMouseLeave={() => setHoverEqIdx(null)}
+                  >
                     <CartesianGrid stroke={S.borderSoft} vertical={false} />
                     <XAxis
                       dataKey="date"
@@ -2714,15 +2728,8 @@ export default function App() {
                       width={58}
                     />
                     {!logScale && <ReferenceLine y={0} stroke={S.textFaint} strokeDasharray="3 3" />}
-                    <Tooltip
-                      // 提示框固定在圖左上角空白處（權益曲線由左下往右上走），不跟著滑鼠移動，避免遮住曲線與換倉標記
-                      position={{ x: 66, y: 6 }}
-                      isAnimationActive={false}
-                      wrapperStyle={{ pointerEvents: "none", zIndex: 5 }}
-                      contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11, opacity: 0.94 }}
-                      labelStyle={{ color: S.textMuted }}
-                      formatter={(v, n) => [fmtReturnPct(logScale ? (v - 1) * 100 : v, 1), n]}
-                    />
+                    {/* 數值改顯示在圖上方的固定列，Tooltip 只保留游標垂直線 */}
+                    <Tooltip content={() => null} isAnimationActive={false} cursor={{ stroke: S.textFaint, strokeDasharray: "3 3" }} />
                     <Legend wrapperStyle={{ fontSize: 11, color: S.textMuted }} />
                     {chartData.series.map((s) => (
                       <Line
@@ -2767,6 +2774,7 @@ export default function App() {
                       ))}
                   </LineChart>
                 </ResponsiveContainer>
+                </>
               )}
               {chartData.series.length > 0 && (
                 <ZoomSlider
@@ -2791,8 +2799,20 @@ export default function App() {
               {drawdownChartData.series.length === 0 ? (
                 <EmptyState S={S} />
               ) : (
+                <>
+                <ReadoutStrip
+                  S={S}
+                  point={hoverDdIdx != null ? ddZoomPoints[hoverDdIdx] : null}
+                  series={drawdownChartData.series}
+                  fmt={(v) => `${v.toFixed(2)}%`}
+                />
                 <ResponsiveContainer width="100%" height={260}>
-                  <AreaChart data={ddZoomPoints} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
+                  <AreaChart
+                    data={ddZoomPoints}
+                    margin={{ top: 6, right: 16, bottom: 0, left: 0 }}
+                    onMouseMove={(st) => { if (st && st.activeTooltipIndex != null) setHoverDdIdx(st.activeTooltipIndex); }}
+                    onMouseLeave={() => setHoverDdIdx(null)}
+                  >
                     <CartesianGrid stroke={S.borderSoft} vertical={false} />
                     <XAxis dataKey="date" tick={{ fontSize: 10, fill: S.textFaint }} minTickGap={40} stroke={S.border} />
                     <YAxis
@@ -2802,11 +2822,7 @@ export default function App() {
                       tickFormatter={(v) => v.toFixed(0) + "%"}
                       width={44}
                     />
-                    <Tooltip
-                      contentStyle={{ background: S.panelAlt, border: `1px solid ${S.border}`, borderRadius: 4, fontSize: 11 }}
-                      labelStyle={{ color: S.textMuted }}
-                      formatter={(v, n) => [`${v.toFixed(2)}%`, n]}
-                    />
+                    <Tooltip content={() => null} isAnimationActive={false} cursor={{ stroke: S.textFaint, strokeDasharray: "3 3" }} />
                     <Legend wrapperStyle={{ fontSize: 11, color: S.textMuted }} />
                     {drawdownChartData.series.map((s) => (
                       <Area
@@ -2825,6 +2841,7 @@ export default function App() {
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
+                </>
               )}
             </div>
 
@@ -3506,6 +3523,29 @@ function SwitchArrow({ cx, cy, kind, S }) {
   const tip = cy - gap;
   return <polygon points={`${cx},${tip} ${cx - w},${tip - h} ${cx + w},${tip - h}`} fill={S.rose} stroke={S.bg} strokeWidth={0.8} style={{ pointerEvents: "none" }} />;
 }
+// 滑鼠停在圖上時的數值列：固定顯示在圖表上方，不遮擋曲線
+function ReadoutStrip({ S, point, series, fmt }) {
+  return (
+    <div
+      className="mono"
+      style={{ display: "flex", flexWrap: "wrap", gap: "2px 14px", alignItems: "center", minHeight: 36, padding: "0 10px 8px", fontSize: 11 }}
+    >
+      {point ? (
+        <>
+          <span style={{ color: S.textMuted }}>{point.date}</span>
+          {series.map((sr) => (
+            <span key={sr.key} style={{ color: S.text, whiteSpace: "nowrap" }}>
+              <span style={{ color: sr.color }}>●</span> {sr.name}：{point[sr.key] == null ? "—" : fmt(point[sr.key])}
+            </span>
+          ))}
+        </>
+      ) : (
+        <span style={{ color: S.textFaint }}>將滑鼠移到圖上，可在此查看當日數值（不會遮住曲線）</span>
+      )}
+    </div>
+  );
+}
+
 function EmptyState({ S }) {
   return (
     <div style={{ height: 420, display: "flex", alignItems: "center", justifyContent: "center", color: S.textFaint, fontSize: 13 }}>
